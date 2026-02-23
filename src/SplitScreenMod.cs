@@ -138,9 +138,30 @@ namespace AWJSplitScreen
 
                     var fixedUpdate = AccessTools.Method(bodyMoveType, "FixedUpdate");
                     if (fixedUpdate != null)
-                        h.Patch(fixedUpdate, prefix: new HarmonyMethod(typeof(BodyMovementPatches), nameof(BodyMovementPatches.FixedUpdate_Prefix)));
+                        h.Patch(fixedUpdate,
+                            prefix: new HarmonyMethod(typeof(BodyMovementPatches), nameof(BodyMovementPatches.FixedUpdate_Prefix)));
 
-                    LoggerInstance.Msg("Patched BodyMovement: FixedUpdate (P2 moveVector injection).");
+                    var npcWalk = AccessTools.Method(bodyMoveType, "NpcWalk");
+                    if (npcWalk != null)
+                        h.Patch(npcWalk,
+                            postfix: new HarmonyMethod(typeof(BodyMovementPatches), nameof(BodyMovementPatches.NpcWalk_Postfix)));
+
+                    var bms = bodyMoveType.GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                    for (int i = 0; i < bms.Length; i++)
+                    {
+                        var m = bms[i];
+                        var ps = m.GetParameters();
+                        if (ps.Length != 1) continue;
+                        var pt = ps[0].ParameterType;
+                        var pname = pt != null ? pt.Name : "";
+                        if (string.Equals(pname, "CallbackContext", StringComparison.Ordinal) ||
+                            (pt != null && pt.FullName != null && pt.FullName.IndexOf("CallbackContext", StringComparison.OrdinalIgnoreCase) >= 0))
+                        {
+                            h.Patch(m, prefix: new HarmonyMethod(typeof(BodyMovementPatches), nameof(BodyMovementPatches.CallbackContextFilter_Prefix)));
+                        }
+                    }
+
+                    LoggerInstance.Msg("Patched BodyMovement: FixedUpdate + NpcWalk (P2 moveVector injection) + CallbackContext filter.");
                     LoggerInstance.Msg("BodyMovement moveVector field: " + (BodyMove_MoveVectorField != null ? BodyMove_MoveVectorField.Name : "null"));
                 }
             }
@@ -763,7 +784,38 @@ namespace AWJSplitScreen
             return mb.GetComponentInParent<P2Marker>() != null;
         }
 
+        public static bool CallbackContextFilter_Prefix(object __instance, object __0)
+        {
+            if (!SplitScreenMod.FilterP1FromP2Gamepad) return true;
+            if (!SplitScreenMod.P2UseGamepad) return true;
+
+            if (IsP2(__instance)) return true;
+
+            if (InputCompat.IsCallbackContextFromP2Gamepad(__0, SplitScreenMod.P2GamepadIndex))
+                return false;
+
+            return true;
+        }
+
         public static void FixedUpdate_Prefix(object __instance)
+        {
+            if (!IsP2(__instance) && SplitScreenMod.FilterP1FromP2Gamepad && SplitScreenMod.P2UseGamepad)
+            {
+                var p2ls = InputCompat.GetP2LeftStick(SplitScreenMod.P2GamepadIndex, SplitScreenMod.P2Deadzone);
+                if (p2ls.sqrMagnitude > 0f)
+                {
+                    var p1ls = InputCompat.GetP1LeftStick(SplitScreenMod.P2Deadzone);
+                    if (p1ls.sqrMagnitude < SplitScreenMod.P2Deadzone * SplitScreenMod.P2Deadzone)
+                    {
+                        var fi = SplitScreenMod.BodyMove_MoveInputField;
+                        if (fi != null)
+                            try { fi.SetValue(__instance, Vector2.zero); } catch { }
+                    }
+                }
+            }
+        }
+
+        public static void NpcWalk_Postfix(object __instance)
         {
             if (!IsP2(__instance)) return;
 
@@ -782,7 +834,7 @@ namespace AWJSplitScreen
             if (SplitScreenMod.P2UseGamepad)
             {
                 var gp = InputCompat.GetP2LeftStick(SplitScreenMod.P2GamepadIndex, SplitScreenMod.P2Deadzone);
-                v += new Vector2(gp.y, -gp.x);
+                v += new Vector2(gp.x, gp.y);
             }
 
             if (v.sqrMagnitude > 1f) v.Normalize();
