@@ -1,0 +1,30 @@
+# Build output
+bin/
+obj/
+
+# NuGet packages
+packages/
+*.nupkg
+*.snupkg
+project.assets.json
+project.nuget.cache
+*.nuget.props
+*.nuget.targets
+
+# Visual Studio
+.vs/
+*.user
+*.suo
+*.userosscache
+*.sln.docobj
+
+# Rider
+.idea/
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Game DLLs (local references - not for source control)
+lib/
