@@ -516,17 +516,29 @@ namespace AWJSplitScreen
                     var targetF3 = legType3.GetField("target", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
                     var offsetF3 = legType3.GetField("startingOffset", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
 
-                    // Get stepTime, stepHeight, newTargetDist from MasterLegController
-                    float stepTime = 0.15f, stepHeight = 0.3f, newTargetDist = 0.3f;
+                    // Get params from MasterLegController
+                    LayerMask whatIsGround = default;
+                    float sphereRadius = 0.1f, rayUpOffset = 0.5f, rayLength = 5f;
+                    float stepTime = 0.15f, stepHeight = 0.3f, tipHeight = 0.02f, newTargetDist = 0.3f;
                     if (mlcType3 != null)
                     {
                         var p2Mlc = _p2Spider.GetComponentInChildren(mlcType3, true);
                         if (p2Mlc != null)
                         {
+                            var wigP = mlcType3.GetProperty("WhatIsGround", BindingFlags.Instance | BindingFlags.Public);
+                            if (wigP != null) whatIsGround = (LayerMask)wigP.GetValue(p2Mlc);
+                            var srP = mlcType3.GetProperty("SphereCastRadius", BindingFlags.Instance | BindingFlags.Public);
+                            if (srP != null) sphereRadius = (float)srP.GetValue(p2Mlc);
+                            var ruoP = mlcType3.GetProperty("RayCastOriginUpOffset", BindingFlags.Instance | BindingFlags.Public);
+                            if (ruoP != null) rayUpOffset = (float)ruoP.GetValue(p2Mlc);
+                            var rlP = mlcType3.GetProperty("RayCastLength", BindingFlags.Instance | BindingFlags.Public);
+                            if (rlP != null) rayLength = (float)rlP.GetValue(p2Mlc);
                             var stP = mlcType3.GetProperty("StepTime", BindingFlags.Instance | BindingFlags.Public);
                             if (stP != null) stepTime = (float)stP.GetValue(p2Mlc);
                             var shP = mlcType3.GetProperty("StepHeight", BindingFlags.Instance | BindingFlags.Public);
                             if (shP != null) stepHeight = (float)shP.GetValue(p2Mlc);
+                            var thP = mlcType3.GetProperty("TipHeight", BindingFlags.Instance | BindingFlags.Public);
+                            if (thP != null) tipHeight = (float)thP.GetValue(p2Mlc);
                             var ntdP = mlcType3.GetProperty("NewTargetDistance", BindingFlags.Instance | BindingFlags.Public);
                             if (ntdP != null) newTargetDist = (float)ntdP.GetValue(p2Mlc);
                         }
@@ -563,7 +575,9 @@ namespace AWJSplitScreen
                         {
                             var driver = go.AddComponent<P2LegDriver>();
                             driver.Init(target3, offset3, p2BodyTransform,
-                                p2GroundTransform, stepTime, stepHeight, newTargetDist);
+                                p2GroundTransform, whatIsGround, sphereRadius,
+                                rayUpOffset, rayLength,
+                                stepTime, stepHeight, tipHeight, newTargetDist);
                         }
                     }
                     LoggerInstance.Msg("Replaced " + p2Legs.Length + " LegController(s) with P2LegDriver on P2.");
@@ -926,98 +940,125 @@ namespace AWJSplitScreen
 
     /// <summary>
     /// Lightweight replacement for LegController on P2.
-    /// The original LegController uses Physics.Raycast which interferes with P1's legs.
-    /// This version uses NO raycasts — it computes leg positions mathematically from
-    /// the spider body's position and orientation.
+    /// The original LegController's continuous FixedUpdate raycasts interfere with P1's legs.
+    /// This version only raycasts when a step is actually needed (in Update, not FixedUpdate),
+    /// which minimizes interference. Falls back to plane projection if raycast misses.
     /// </summary>
     public sealed class P2LegDriver : MonoBehaviour
     {
         private Transform _target;
-        private Transform _bodyTransform;  // BodyMovement transform (spider body root)
-        private Transform _groundTransform; // BodyMovement.targetTransform (at ground level)
-        private Vector3 _startingOffset;   // leg rest position in local space
+        private Transform _bodyTransform;
+        private Transform _groundTransform;
+        private Vector3 _startingOffset;
+        private LayerMask _whatIsGround;
+        private float _sphereRadius;
+        private float _rayUpOffset;
+        private float _rayLength;
         private float _stepTime;
         private float _stepHeight;
+        private float _tipHeight;
         private float _newTargetDist;
 
-        private Vector3 _goalPos;   // current ground goal in world space
-        private Vector3 _oldTarget; // start of current step animation
+        private Vector3 _goalPos;
+        private Vector3 _goalNormal = Vector3.up;
+        private Vector3 _oldTarget;
         private float _lerp = 1f;
         private float _scale = 1f;
         private bool _inited;
 
         public void Init(Transform target, Vector3 startingOffset, Transform bodyTransform,
-            Transform groundTransform, float stepTime, float stepHeight, float newTargetDist)
+            Transform groundTransform, LayerMask whatIsGround, float sphereRadius,
+            float rayUpOffset, float rayLength,
+            float stepTime, float stepHeight, float tipHeight, float newTargetDist)
         {
             _target = target;
             _startingOffset = startingOffset;
             _bodyTransform = bodyTransform;
             _groundTransform = groundTransform;
+            _whatIsGround = whatIsGround;
+            _sphereRadius = sphereRadius;
+            _rayUpOffset = rayUpOffset;
+            _rayLength = rayLength;
             _stepTime = Mathf.Max(stepTime, 0.05f);
             _stepHeight = stepHeight;
+            _tipHeight = tipHeight;
             _newTargetDist = Mathf.Max(newTargetDist, 0.1f);
             _scale = transform.lossyScale.x;
             _inited = true;
 
-            // Place leg at initial rest position
-            _goalPos = ComputeRestPosition();
+            // Initial placement via single raycast (proven not to interfere)
+            var origin = transform.position + transform.forward * _startingOffset.z
+                       + _bodyTransform.up * _rayUpOffset * _scale;
+            if (Physics.Raycast(origin, -_bodyTransform.up, out var hit, _rayLength * _scale, _whatIsGround))
+            {
+                _goalPos = hit.point + hit.normal * _tipHeight * _scale;
+                _goalNormal = hit.normal;
+            }
+            else
+            {
+                _goalPos = ComputeFallbackPosition();
+            }
             if (_target != null) _target.position = _goalPos;
             _lerp = 1f;
         }
 
-        private Vector3 ComputeRestPosition()
+        private Vector3 ComputeFallbackPosition()
         {
             if (_bodyTransform == null) return transform.position;
-
             var body = _bodyTransform;
-            var up = body.up; // surface normal (works on walls/ceilings too)
-
-            // Leg rest position: start from leg root, add forward offset
+            var up = body.up;
             var pos = transform.position + body.forward * _startingOffset.z * _scale;
-
-            // Project onto the ground plane perpendicular to body.up.
-            // Ground plane passes through groundTransform (or body - up*offset).
             Vector3 groundPoint = _groundTransform != null
                 ? _groundTransform.position
                 : body.position - up * 0.5f * _scale;
-
-            // Project pos onto the plane defined by (groundPoint, up)
-            float distAbovePlane = Vector3.Dot(pos - groundPoint, up);
-            pos -= up * distAbovePlane;
-
-            return pos;
+            float d = Vector3.Dot(pos - groundPoint, up);
+            return pos - up * d;
         }
 
         private void Update()
         {
             if (!_inited || _target == null) return;
 
+            // Step animation
             if (_lerp < 1f)
             {
                 var pos = Vector3.Lerp(_oldTarget, _goalPos, _lerp);
-                pos.y += Mathf.Sin(_lerp * Mathf.PI) * _stepHeight * _scale;
+                pos += _goalNormal * Mathf.Sin(_lerp * Mathf.PI) * _stepHeight * _scale;
                 _target.position = pos;
+                _target.rotation = Quaternion.LookRotation(
+                    Vector3.Cross(transform.right, _goalNormal), _goalNormal);
                 _lerp += Time.deltaTime / (_stepTime * _scale);
             }
             else
             {
                 _target.position = _goalPos;
+
+                // Check if step needed (only when idle, not every frame during animation)
+                if (_bodyTransform == null) return;
+                var checkPos = transform.position + _bodyTransform.forward * _startingOffset.z * _scale;
+                var dist = (checkPos - _goalPos).magnitude;
+                if (dist <= _newTargetDist * _scale) return;
+
+                // Need to step — do ONE SphereCast to find ground (catches thin web strands)
+                var origin = checkPos + _bodyTransform.up * _rayUpOffset * _scale;
+                Vector3 newGoal;
+                Vector3 newNormal;
+                if (Physics.SphereCast(origin, _sphereRadius * _scale, -_bodyTransform.up, out var hit, _rayLength * _scale, _whatIsGround))
+                {
+                    newGoal = hit.point + hit.normal * _tipHeight * _scale;
+                    newNormal = hit.normal;
+                }
+                else
+                {
+                    newGoal = ComputeFallbackPosition();
+                    newNormal = _bodyTransform.up;
+                }
+
+                _oldTarget = _goalPos;
+                _goalPos = newGoal;
+                _goalNormal = newNormal;
+                _lerp = 0f;
             }
-        }
-
-        private void LateUpdate()
-        {
-            if (!_inited || _target == null || _bodyTransform == null) return;
-            if (_lerp < 1f) return;
-
-            // Check if leg needs to step (no raycasts — just compute new rest position)
-            var newGoal = ComputeRestPosition();
-            var dist = (newGoal - _goalPos).magnitude;
-            if (dist <= _newTargetDist * _scale) return;
-
-            _oldTarget = _goalPos;
-            _goalPos = newGoal;
-            _lerp = 0f;
         }
     }
 
