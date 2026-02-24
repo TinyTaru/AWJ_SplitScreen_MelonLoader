@@ -515,10 +515,12 @@ namespace AWJSplitScreen
                 {
                     var targetF3 = legType3.GetField("target", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
                     var offsetF3 = legType3.GetField("startingOffset", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+                    var centerF3 = legType3.GetField("center", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+                    var opposingF3 = legType3.GetField("opposingLegs", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
 
                     // Get params from MasterLegController
                     LayerMask whatIsGround = default;
-                    float sphereRadius = 0.1f, rayUpOffset = 0.5f, rayLength = 5f;
+                    float sphereRadius = 0.1f, rayUpOffset = 0.5f, rayLength = 5f, stepDist = 0.3f;
                     float stepTime = 0.15f, stepHeight = 0.3f, tipHeight = 0.02f, newTargetDist = 0.3f;
                     if (mlcType3 != null)
                     {
@@ -541,44 +543,61 @@ namespace AWJSplitScreen
                             if (thP != null) tipHeight = (float)thP.GetValue(p2Mlc);
                             var ntdP = mlcType3.GetProperty("NewTargetDistance", BindingFlags.Instance | BindingFlags.Public);
                             if (ntdP != null) newTargetDist = (float)ntdP.GetValue(p2Mlc);
+                            var sdP = mlcType3.GetProperty("StepDistance", BindingFlags.Instance | BindingFlags.Public);
+                            if (sdP != null) stepDist = (float)sdP.GetValue(p2Mlc);
                         }
                     }
 
-                    // Get P2's BodyMovement transform + targetTransform (ground level)
+                    // Get P2's BodyMovement component (for MoveVector and forward anticipation)
                     var bodyMoveType3 = AccessTools.TypeByName("_Scripts.Spider.BodyMovement");
                     Transform p2BodyTransform = null;
-                    Transform p2GroundTransform = null;
+                    Component p2BodyMovement = null;
+                    FieldInfo moveVecField = null;
                     if (bodyMoveType3 != null)
                     {
-                        var p2Bm = _p2Spider.GetComponentInChildren(bodyMoveType3, true);
-                        if (p2Bm != null)
+                        p2BodyMovement = _p2Spider.GetComponentInChildren(bodyMoveType3, true) as Component;
+                        if (p2BodyMovement != null)
                         {
-                            p2BodyTransform = (p2Bm as Component).transform;
-                            var ttProp = bodyMoveType3.GetProperty("TargetTransform",
-                                BindingFlags.Instance | BindingFlags.Public);
-                            p2GroundTransform = ttProp?.GetValue(p2Bm) as Transform;
+                            p2BodyTransform = p2BodyMovement.transform;
+                            moveVecField = SplitScreenMod.BodyMove_MoveVectorField
+                                ?? bodyMoveType3.GetField("moveVector", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
                         }
                     }
 
-                    // Save leg data, destroy LegController, add P2LegDriver
+                    // First pass: collect raw LegController data, destroy, create drivers
                     var p2Legs = _p2Spider.GetComponentsInChildren(legType3, true);
+                    var drivers = new P2LegDriver[p2Legs.Length];
                     for (int i = 0; i < p2Legs.Length; i++)
                     {
                         var lc = p2Legs[i];
                         var go = (lc as Component).gameObject;
                         var target3 = targetF3?.GetValue(lc) as Transform;
                         var offset3 = offsetF3 != null ? (Vector3)offsetF3.GetValue(lc) : Vector3.zero;
+                        var center3 = centerF3?.GetValue(lc) as Transform;
 
                         UnityEngine.Object.DestroyImmediate(lc);
 
                         if (target3 != null && p2BodyTransform != null)
                         {
                             var driver = go.AddComponent<P2LegDriver>();
-                            driver.Init(target3, offset3, p2BodyTransform,
-                                p2GroundTransform, whatIsGround, sphereRadius,
-                                rayUpOffset, rayLength,
+                            driver.Init(target3, offset3, center3, p2BodyTransform,
+                                p2BodyMovement, moveVecField,
+                                whatIsGround, sphereRadius,
+                                rayUpOffset, rayLength, stepDist,
                                 stepTime, stepHeight, tipHeight, newTargetDist);
+                            drivers[i] = driver;
                         }
+                    }
+
+                    // Second pass: wire up opposing-leg pairs (alternate-gait)
+                    // Original uses pairs: legs 0↔1, 2↔3, 4↔5 (or similar index grouping).
+                    // We replicate by pairing even↔odd index drivers.
+                    for (int i = 0; i < drivers.Length; i++)
+                    {
+                        if (drivers[i] == null) continue;
+                        int partner = (i % 2 == 0) ? i + 1 : i - 1;
+                        if (partner >= 0 && partner < drivers.Length && drivers[partner] != null)
+                            drivers[i].SetOpposingLegs(new P2LegDriver[] { drivers[partner] });
                     }
                     LoggerInstance.Msg("Replaced " + p2Legs.Length + " LegController(s) with P2LegDriver on P2.");
                 }
@@ -939,126 +958,257 @@ namespace AWJSplitScreen
     public sealed class P2Marker : MonoBehaviour { }
 
     /// <summary>
-    /// Lightweight replacement for LegController on P2.
-    /// The original LegController's continuous FixedUpdate raycasts interfere with P1's legs.
-    /// This version only raycasts when a step is actually needed (in Update, not FixedUpdate),
-    /// which minimizes interference. Falls back to plane projection if raycast misses.
+    /// Faithful replacement for LegController on P2.
+    /// Replicates: surface-parented targetLocal, center-based distance check,
+    /// StepDistance anticipation, alternating gait (opposingLegs), multi-radius
+    /// SphereCast chain, and surface-normal driven rotation.
+    /// Raycasts only on step (in Update not FixedUpdate) to avoid P1 interference.
     /// </summary>
     public sealed class P2LegDriver : MonoBehaviour
     {
+        // IK target written by this driver
         private Transform _target;
+        // Local "foot anchor" parented to the hit surface so feet track moving geometry
+        private Transform _targetLocal;
+        // Center transform — rest position of this leg, used for step-distance check
+        private Transform _center;
+        // Spider body transform (provides forward/up for anticipatory cast)
         private Transform _bodyTransform;
-        private Transform _groundTransform;
-        private Vector3 _startingOffset;
+        // BodyMovement component + moveVector field for anticipation
+        private Component _bodyMovement;
+        private FieldInfo _moveVecField;
+
         private LayerMask _whatIsGround;
         private float _sphereRadius;
         private float _rayUpOffset;
         private float _rayLength;
+        private float _stepDist;
         private float _stepTime;
         private float _stepHeight;
         private float _tipHeight;
         private float _newTargetDist;
 
-        private Vector3 _goalPos;
-        private Vector3 _goalNormal = Vector3.up;
         private Vector3 _oldTarget;
         private float _lerp = 1f;
         private float _scale = 1f;
         private bool _inited;
+        private bool _resetLeg;
+        private bool _instantReset;
 
-        public void Init(Transform target, Vector3 startingOffset, Transform bodyTransform,
-            Transform groundTransform, LayerMask whatIsGround, float sphereRadius,
-            float rayUpOffset, float rayLength,
+        private P2LegDriver[] _opposingLegs;
+
+        public bool IsAnimating => _lerp < 1f;
+
+        public void SetOpposingLegs(P2LegDriver[] legs) { _opposingLegs = legs; }
+
+        public void Init(Transform target, Vector3 startingOffset, Transform center,
+            Transform bodyTransform, Component bodyMovement, FieldInfo moveVecField,
+            LayerMask whatIsGround, float sphereRadius,
+            float rayUpOffset, float rayLength, float stepDist,
             float stepTime, float stepHeight, float tipHeight, float newTargetDist)
         {
             _target = target;
-            _startingOffset = startingOffset;
+            _center = center;
             _bodyTransform = bodyTransform;
-            _groundTransform = groundTransform;
+            _bodyMovement = bodyMovement;
+            _moveVecField = moveVecField;
             _whatIsGround = whatIsGround;
             _sphereRadius = sphereRadius;
             _rayUpOffset = rayUpOffset;
             _rayLength = rayLength;
+            _stepDist = stepDist;
             _stepTime = Mathf.Max(stepTime, 0.05f);
             _stepHeight = stepHeight;
             _tipHeight = tipHeight;
-            _newTargetDist = Mathf.Max(newTargetDist, 0.1f);
-            _scale = transform.lossyScale.x;
-            _inited = true;
+            _newTargetDist = Mathf.Max(newTargetDist, 0.05f);
+            _scale = Mathf.Max(transform.lossyScale.x, 0.01f);
 
-            // Initial placement via single raycast (proven not to interfere)
-            var origin = transform.position + transform.forward * _startingOffset.z
-                       + _bodyTransform.up * _rayUpOffset * _scale;
-            if (Physics.Raycast(origin, -_bodyTransform.up, out var hit, _rayLength * _scale, _whatIsGround))
+            // Create a dedicated targetLocal child GameObject (mirrors original LegController)
+            var tlGo = new GameObject("P2LegTargetLocal_" + gameObject.name);
+            _targetLocal = tlGo.transform;
+            _targetLocal.SetParent(null, false);
+
+            // Initial placement: try raycast downward from leg root
+            var origin = transform.position + _bodyTransform.up * _rayUpOffset * _scale;
+            var ray = new Ray(origin, -_bodyTransform.up);
+            RaycastHit hit;
+            if (CheckLegSphereCast(ray, out hit))
             {
-                _goalPos = hit.point + hit.normal * _tipHeight * _scale;
-                _goalNormal = hit.normal;
+                PlaceTargetLocal(hit);
+                _lerp = 1f;
+                if (_target != null)
+                {
+                    _target.position = _targetLocal.position;
+                    _target.rotation = _targetLocal.rotation;
+                }
             }
             else
             {
-                _goalPos = ComputeFallbackPosition();
+                _targetLocal.position = transform.position - _bodyTransform.up * _scale * 0.5f;
+                _targetLocal.rotation = Quaternion.LookRotation(
+                    Vector3.Cross(transform.right, _bodyTransform.up), _bodyTransform.up);
+                _lerp = 1f;
             }
-            if (_target != null) _target.position = _goalPos;
-            _lerp = 1f;
+            _oldTarget = _targetLocal.position;
+            _inited = true;
         }
 
-        private Vector3 ComputeFallbackPosition()
+        private void OnDestroy()
         {
-            if (_bodyTransform == null) return transform.position;
-            var body = _bodyTransform;
-            var up = body.up;
-            var pos = transform.position + body.forward * _startingOffset.z * _scale;
-            Vector3 groundPoint = _groundTransform != null
-                ? _groundTransform.position
-                : body.position - up * 0.5f * _scale;
-            float d = Vector3.Dot(pos - groundPoint, up);
-            return pos - up * d;
+            if (_targetLocal != null)
+                UnityEngine.Object.Destroy(_targetLocal.gameObject);
         }
 
         private void Update()
         {
-            if (!_inited || _target == null) return;
+            if (!_inited || _target == null || _targetLocal == null) return;
+            PerformLegAnimation(Time.deltaTime);
+            PerformWalking();
+        }
 
-            // Step animation
+        private void PerformLegAnimation(float dt)
+        {
             if (_lerp < 1f)
             {
-                var pos = Vector3.Lerp(_oldTarget, _goalPos, _lerp);
-                pos += _goalNormal * Mathf.Sin(_lerp * Mathf.PI) * _stepHeight * _scale;
+                _target.rotation = _targetLocal.rotation;
+                var pos = Vector3.Lerp(_oldTarget, _targetLocal.position, _lerp);
+                pos += _target.up * Mathf.Sin(_lerp * Mathf.PI) * _stepHeight * _scale;
                 _target.position = pos;
-                _target.rotation = Quaternion.LookRotation(
-                    Vector3.Cross(transform.right, _goalNormal), _goalNormal);
-                _lerp += Time.deltaTime / (_stepTime * _scale);
+                _lerp += dt / (_stepTime * _scale);
             }
             else
             {
-                _target.position = _goalPos;
+                _target.position = _targetLocal.position;
+                _target.rotation = _targetLocal.rotation;
+            }
+        }
 
-                // Check if step needed (only when idle, not every frame during animation)
-                if (_bodyTransform == null) return;
-                var checkPos = transform.position + _bodyTransform.forward * _startingOffset.z * _scale;
-                var dist = (checkPos - _goalPos).magnitude;
-                if (dist <= _newTargetDist * _scale) return;
+        private void PerformWalking()
+        {
+            if (_lerp >= 1f)
+                CheckLegPosition();
+        }
 
-                // Need to step — do ONE SphereCast to find ground (catches thin web strands)
-                var origin = checkPos + _bodyTransform.up * _rayUpOffset * _scale;
-                Vector3 newGoal;
-                Vector3 newNormal;
-                if (Physics.SphereCast(origin, _sphereRadius * _scale, -_bodyTransform.up, out var hit, _rayLength * _scale, _whatIsGround))
+        private void CheckLegPosition()
+        {
+            // Compute ray origin with optional move-vector anticipation
+            Vector3 rayOrigin;
+            if (_resetLeg)
+            {
+                rayOrigin = transform.position
+                    + transform.forward * 0f
+                    + _bodyTransform.up * _rayUpOffset * _scale;
+            }
+            else
+            {
+                var moveY = GetMoveVectorY();
+                rayOrigin = transform.position
+                    + _bodyTransform.up * _rayUpOffset * _scale
+                    + _bodyTransform.forward * moveY * _stepDist * _scale;
+            }
+
+            var ray = new Ray(rayOrigin, -_bodyTransform.up);
+
+            // Alternating gait: don't step if any opposing leg is mid-animation
+            if (!AllOpposingIdle()) return;
+
+            if (_resetLeg)
+            {
+                RaycastHit hit;
+                if (CheckLegSphereCast(ray, out hit) || _instantReset)
                 {
-                    newGoal = hit.point + hit.normal * _tipHeight * _scale;
-                    newNormal = hit.normal;
+                    StartLegAnimation(hit);
                 }
-                else
+            }
+            else
+            {
+                // Use center transform if available, otherwise fall back to targetLocal
+                var refPos = (_center != null) ? _center.position : _targetLocal.position;
+                var dist = (refPos - _targetLocal.position).magnitude;
+                if (dist > _newTargetDist * _scale)
                 {
-                    newGoal = ComputeFallbackPosition();
-                    newNormal = _bodyTransform.up;
+                    RaycastHit hit;
+                    if (CheckLegSphereCast(ray, out hit))
+                        StartLegAnimation(hit);
                 }
+            }
+        }
 
-                _oldTarget = _goalPos;
-                _goalPos = newGoal;
-                _goalNormal = newNormal;
+        private void StartLegAnimation(RaycastHit hit)
+        {
+            if (hit.transform == null && !_instantReset) return;
+
+            _oldTarget = _targetLocal.position;
+
+            if (hit.transform != null)
+            {
+                _targetLocal.position = hit.point + hit.normal * _tipHeight * _scale;
+                var fwd = Vector3.Cross(transform.right, hit.normal);
+                _targetLocal.rotation = Quaternion.LookRotation(fwd, hit.normal);
+                // Parent to hit surface so feet track moving geometry (webs, platforms)
+                _targetLocal.SetParent(hit.transform, true);
+            }
+
+            if (_instantReset)
+            {
+                _lerp = 1f;
+                if (_target != null)
+                {
+                    _target.position = _targetLocal.position;
+                    _target.rotation = _targetLocal.rotation;
+                }
+                _resetLeg = false;
+                _instantReset = false;
+            }
+            else
+            {
                 _lerp = 0f;
             }
+        }
+
+        private bool AllOpposingIdle()
+        {
+            if (_opposingLegs == null || _opposingLegs.Length == 0) return true;
+            for (int i = 0; i < _opposingLegs.Length; i++)
+                if (_opposingLegs[i] != null && _opposingLegs[i].IsAnimating)
+                    return false;
+            return true;
+        }
+
+        private float GetMoveVectorY()
+        {
+            if (_bodyMovement == null || _moveVecField == null) return 0f;
+            try
+            {
+                var v = _moveVecField.GetValue(_bodyMovement);
+                if (v is Vector2) return ((Vector2)v).y;
+                if (v is Vector3) return ((Vector3)v).y;
+            }
+            catch { }
+            return 0f;
+        }
+
+        private bool CheckLegSphereCast(Ray ray, out RaycastHit hit)
+        {
+            // Mirrors original: Raycast first, then 4 SphereCasts with increasing radius
+            if (Physics.Raycast(ray, out hit, _rayLength * _scale, _whatIsGround))
+                return true;
+            for (int i = 1; i <= 4; i++)
+            {
+                float r = _sphereRadius * _scale * i * 0.25f;
+                if (Physics.SphereCast(ray, r, out hit, _rayLength * _scale, _whatIsGround))
+                    return true;
+            }
+            hit = default;
+            return false;
+        }
+
+        private void PlaceTargetLocal(RaycastHit hit)
+        {
+            _targetLocal.position = hit.point + hit.normal * _tipHeight * _scale;
+            var fwd = Vector3.Cross(transform.right, hit.normal);
+            _targetLocal.rotation = Quaternion.LookRotation(fwd, hit.normal);
+            _targetLocal.SetParent(hit.transform, true);
         }
     }
 
