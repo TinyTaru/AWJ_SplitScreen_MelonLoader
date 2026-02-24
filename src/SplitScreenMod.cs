@@ -61,7 +61,7 @@ namespace AWJSplitScreen
         private Camera _camRightOrBottom;
 
         private GameObject _p1Spider;
-        private GameObject _p2Spider;
+        internal static GameObject _p2Spider;
         private Transform _p1InputTransform;
 
         private float _p2CamYaw;
@@ -161,13 +161,31 @@ namespace AWJSplitScreen
                         }
                     }
 
-                    LoggerInstance.Msg("Patched BodyMovement: FixedUpdate + NpcWalk (P2 moveVector injection) + CallbackContext filter.");
+                    LoggerInstance.Msg("Patched BodyMovement: FixedUpdate + NpcWalk + CallbackContext filter.");
                     LoggerInstance.Msg("BodyMovement moveVector field: " + (BodyMove_MoveVectorField != null ? BodyMove_MoveVectorField.Name : "null"));
                 }
             }
             catch (Exception ex)
             {
                 LoggerInstance.Warning("BodyMovement patch block failed (non-fatal): " + ex);
+            }
+
+            // LegController patches
+            try
+            {
+                var legType = AccessTools.TypeByName("_Scripts.Spider.LegController");
+                if (legType != null)
+                {
+                    var legFixed = AccessTools.Method(legType, "FixedUpdate");
+                    if (legFixed != null)
+                        h.Patch(legFixed, prefix: new HarmonyMethod(typeof(LegControllerPatches), nameof(LegControllerPatches.FixedUpdate_Prefix)));
+
+                    LoggerInstance.Msg("Patched LegController: FixedUpdate (P2 parent-guard suppression).");
+                }
+            }
+            catch (Exception ex)
+            {
+                LoggerInstance.Warning("LegController patch block failed (non-fatal): " + ex);
             }
 
             // WebController patches
@@ -479,11 +497,102 @@ namespace AWJSplitScreen
 
             _p2Spider = UnityEngine.Object.Instantiate(_p1Spider);
             _p2Spider.name = _p1Spider.name + "_P2";
-            _p2Spider.transform.position += new Vector3(0.75f, 0f, 0.75f);
+            _p2Spider.transform.position += new Vector3(3f, 0f, 3f);
 
             _p1InputTransform = FindChildTransform(_p1Spider.transform, "InputTransform");
 
             _p2Spider.AddComponent<P2Marker>();
+
+            // Destroy P2's LegController + Animation Rigging components.
+            // Binary search confirmed LegController on P2 causes P1's leg glitch.
+            // Also destroy RigBuilder/Rig so the IK system doesn't fight with our
+            // direct bone-driving replacement (P2LegDriver).
+            try
+            {
+                var legType3 = AccessTools.TypeByName("_Scripts.Spider.LegController");
+                var mlcType3 = AccessTools.TypeByName("_Scripts.Spider.MasterLegController");
+                if (legType3 != null)
+                {
+                    var targetF3 = legType3.GetField("target", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+                    var offsetF3 = legType3.GetField("startingOffset", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+
+                    // Get stepTime, stepHeight, newTargetDist from MasterLegController
+                    float stepTime = 0.15f, stepHeight = 0.3f, newTargetDist = 0.3f;
+                    if (mlcType3 != null)
+                    {
+                        var p2Mlc = _p2Spider.GetComponentInChildren(mlcType3, true);
+                        if (p2Mlc != null)
+                        {
+                            var stP = mlcType3.GetProperty("StepTime", BindingFlags.Instance | BindingFlags.Public);
+                            if (stP != null) stepTime = (float)stP.GetValue(p2Mlc);
+                            var shP = mlcType3.GetProperty("StepHeight", BindingFlags.Instance | BindingFlags.Public);
+                            if (shP != null) stepHeight = (float)shP.GetValue(p2Mlc);
+                            var ntdP = mlcType3.GetProperty("NewTargetDistance", BindingFlags.Instance | BindingFlags.Public);
+                            if (ntdP != null) newTargetDist = (float)ntdP.GetValue(p2Mlc);
+                        }
+                    }
+
+                    // Get P2's BodyMovement transform + targetTransform (ground level)
+                    var bodyMoveType3 = AccessTools.TypeByName("_Scripts.Spider.BodyMovement");
+                    Transform p2BodyTransform = null;
+                    Transform p2GroundTransform = null;
+                    if (bodyMoveType3 != null)
+                    {
+                        var p2Bm = _p2Spider.GetComponentInChildren(bodyMoveType3, true);
+                        if (p2Bm != null)
+                        {
+                            p2BodyTransform = (p2Bm as Component).transform;
+                            var ttProp = bodyMoveType3.GetProperty("TargetTransform",
+                                BindingFlags.Instance | BindingFlags.Public);
+                            p2GroundTransform = ttProp?.GetValue(p2Bm) as Transform;
+                        }
+                    }
+
+                    // Save leg data, destroy LegController, add P2LegDriver
+                    var p2Legs = _p2Spider.GetComponentsInChildren(legType3, true);
+                    for (int i = 0; i < p2Legs.Length; i++)
+                    {
+                        var lc = p2Legs[i];
+                        var go = (lc as Component).gameObject;
+                        var target3 = targetF3?.GetValue(lc) as Transform;
+                        var offset3 = offsetF3 != null ? (Vector3)offsetF3.GetValue(lc) : Vector3.zero;
+
+                        UnityEngine.Object.DestroyImmediate(lc);
+
+                        if (target3 != null && p2BodyTransform != null)
+                        {
+                            var driver = go.AddComponent<P2LegDriver>();
+                            driver.Init(target3, offset3, p2BodyTransform,
+                                p2GroundTransform, stepTime, stepHeight, newTargetDist);
+                        }
+                    }
+                    LoggerInstance.Msg("Replaced " + p2Legs.Length + " LegController(s) with P2LegDriver on P2.");
+                }
+
+                // Keep RigBuilder/Rig alive — the IK system drives visual bones toward
+                // target positions. P2LegDriver updates targets without raycasts.
+                // Rebuild RigBuilder so IK binds to P2's own bones.
+                Type rigBuilderType = null;
+                foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+                {
+                    rigBuilderType = asm.GetType("UnityEngine.Animations.Rigging.RigBuilder");
+                    if (rigBuilderType != null) break;
+                }
+                if (rigBuilderType != null)
+                {
+                    var rigBuilders = _p2Spider.GetComponentsInChildren(rigBuilderType, true);
+                    MethodInfo buildMethod = null;
+                    foreach (var m in rigBuilderType.GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic))
+                        if (m.Name == "Build" && m.GetParameters().Length == 0) { buildMethod = m; break; }
+                    for (int ri = 0; ri < rigBuilders.Length; ri++)
+                        buildMethod?.Invoke(rigBuilders[ri], null);
+                    LoggerInstance.Msg("Rebuilt " + rigBuilders.Length + " RigBuilder(s) on P2.");
+                }
+            }
+            catch (Exception ex)
+            {
+                LoggerInstance.Warning("Failed to replace P2 LegControllers (non-fatal): " + ex);
+            }
 
             // Critical: set isPlayer=false on all BodyMovement components on P2 clone.
             // GameController.Start() does FindObjectsByType<BodyMovement> and sets player=
@@ -502,6 +611,16 @@ namespace AWJSplitScreen
                         for (int i = 0; i < bms.Length; i++)
                             isPlayerField.SetValue(bms[i], false);
                         LoggerInstance.Msg("Set isPlayer=false on " + bms.Length + " P2 BodyMovement(s).");
+
+                        // Null out followTarget on P2 to prevent drift toward P1
+                        var ftField = bodyMoveType.GetField("followTarget",
+                            BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+                        if (ftField != null)
+                        {
+                            for (int i = 0; i < bms.Length; i++)
+                                ftField.SetValue(bms[i], null);
+                            LoggerInstance.Msg("Nulled followTarget on P2 BodyMovement(s).");
+                        }
                     }
                     else
                     {
@@ -512,6 +631,54 @@ namespace AWJSplitScreen
             catch (Exception ex)
             {
                 LoggerInstance.Warning("Failed to set isPlayer=false on P2 spider (non-fatal): " + ex);
+            }
+
+            // Clear P2's MasterLegController.legs list — when cloned, it inherits P1's
+            // LegController instances. P2's own LegController.Start() will re-populate it.
+            // Without this, P2's MasterLegController drives P1's legs (ResetAllLegs, etc.)
+            // causing P1's legs to glitch when P2 exists.
+            try
+            {
+                var masterLegType = AccessTools.TypeByName("_Scripts.Spider.MasterLegController");
+                if (masterLegType != null)
+                {
+                    var legsField = masterLegType.GetField("legs",
+                        BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+                    if (legsField != null)
+                    {
+                        var p2Masters = _p2Spider.GetComponentsInChildren(masterLegType, true);
+                        for (int i = 0; i < p2Masters.Length; i++)
+                        {
+                            var list = legsField.GetValue(p2Masters[i]);
+                            if (list != null)
+                            {
+                                var clearMethod = list.GetType().GetMethod("Clear");
+                                clearMethod?.Invoke(list, null);
+                            }
+                        }
+                        LoggerInstance.Msg("Cleared legs list on " + p2Masters.Length + " P2 MasterLegController(s).");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                LoggerInstance.Warning("Failed to clear P2 MasterLegController.legs (non-fatal): " + ex);
+            }
+
+            // Move ALL P2 GameObjects to layer 2 (Ignore Raycast).
+            // Physics.IgnoreCollision does NOT affect SphereCast/Raycast — only layer
+            // masks do. whatIsGround (21268800) excludes layer 2, so P1's leg raycasts
+            // will never hit P2's colliders.
+            try
+            {
+                var allP2Transforms = _p2Spider.GetComponentsInChildren<Transform>(true);
+                for (int i = 0; i < allP2Transforms.Length; i++)
+                    allP2Transforms[i].gameObject.layer = 2; // Ignore Raycast
+                LoggerInstance.Msg("Set " + allP2Transforms.Length + " P2 GameObjects to layer 2 (Ignore Raycast).");
+            }
+            catch (Exception ex)
+            {
+                LoggerInstance.Warning("Failed to set P2 layers (non-fatal): " + ex);
             }
 
             DestroyComponentByTypeName(_p2Spider, "_Scripts.General.DontDestroyMe");
@@ -757,6 +924,103 @@ namespace AWJSplitScreen
 
     public sealed class P2Marker : MonoBehaviour { }
 
+    /// <summary>
+    /// Lightweight replacement for LegController on P2.
+    /// The original LegController uses Physics.Raycast which interferes with P1's legs.
+    /// This version uses NO raycasts — it computes leg positions mathematically from
+    /// the spider body's position and orientation.
+    /// </summary>
+    public sealed class P2LegDriver : MonoBehaviour
+    {
+        private Transform _target;
+        private Transform _bodyTransform;  // BodyMovement transform (spider body root)
+        private Transform _groundTransform; // BodyMovement.targetTransform (at ground level)
+        private Vector3 _startingOffset;   // leg rest position in local space
+        private float _stepTime;
+        private float _stepHeight;
+        private float _newTargetDist;
+
+        private Vector3 _goalPos;   // current ground goal in world space
+        private Vector3 _oldTarget; // start of current step animation
+        private float _lerp = 1f;
+        private float _scale = 1f;
+        private bool _inited;
+
+        public void Init(Transform target, Vector3 startingOffset, Transform bodyTransform,
+            Transform groundTransform, float stepTime, float stepHeight, float newTargetDist)
+        {
+            _target = target;
+            _startingOffset = startingOffset;
+            _bodyTransform = bodyTransform;
+            _groundTransform = groundTransform;
+            _stepTime = Mathf.Max(stepTime, 0.05f);
+            _stepHeight = stepHeight;
+            _newTargetDist = Mathf.Max(newTargetDist, 0.1f);
+            _scale = transform.lossyScale.x;
+            _inited = true;
+
+            // Place leg at initial rest position
+            _goalPos = ComputeRestPosition();
+            if (_target != null) _target.position = _goalPos;
+            _lerp = 1f;
+        }
+
+        private Vector3 ComputeRestPosition()
+        {
+            if (_bodyTransform == null) return transform.position;
+
+            var body = _bodyTransform;
+            var up = body.up; // surface normal (works on walls/ceilings too)
+
+            // Leg rest position: start from leg root, add forward offset
+            var pos = transform.position + body.forward * _startingOffset.z * _scale;
+
+            // Project onto the ground plane perpendicular to body.up.
+            // Ground plane passes through groundTransform (or body - up*offset).
+            Vector3 groundPoint = _groundTransform != null
+                ? _groundTransform.position
+                : body.position - up * 0.5f * _scale;
+
+            // Project pos onto the plane defined by (groundPoint, up)
+            float distAbovePlane = Vector3.Dot(pos - groundPoint, up);
+            pos -= up * distAbovePlane;
+
+            return pos;
+        }
+
+        private void Update()
+        {
+            if (!_inited || _target == null) return;
+
+            if (_lerp < 1f)
+            {
+                var pos = Vector3.Lerp(_oldTarget, _goalPos, _lerp);
+                pos.y += Mathf.Sin(_lerp * Mathf.PI) * _stepHeight * _scale;
+                _target.position = pos;
+                _lerp += Time.deltaTime / (_stepTime * _scale);
+            }
+            else
+            {
+                _target.position = _goalPos;
+            }
+        }
+
+        private void LateUpdate()
+        {
+            if (!_inited || _target == null || _bodyTransform == null) return;
+            if (_lerp < 1f) return;
+
+            // Check if leg needs to step (no raycasts — just compute new rest position)
+            var newGoal = ComputeRestPosition();
+            var dist = (newGoal - _goalPos).magnitude;
+            if (dist <= _newTargetDist * _scale) return;
+
+            _oldTarget = _goalPos;
+            _goalPos = newGoal;
+            _lerp = 0f;
+        }
+    }
+
     internal static class CameraMouseLookPatches
     {
         public static bool OnLook_Prefix(object __0)
@@ -823,7 +1087,6 @@ namespace AWJSplitScreen
             if (fv == null) return;
 
             Vector2 v = Vector2.zero;
-
             float x = 0f, y = 0f;
             if (InputCompat.Held_J()) x -= 1f;
             if (InputCompat.Held_L()) x += 1f;
@@ -838,8 +1101,38 @@ namespace AWJSplitScreen
             }
 
             if (v.sqrMagnitude > 1f) v.Normalize();
-
             try { fv.SetValue(__instance, v); } catch { }
+        }
+    }
+
+    internal static class LegControllerPatches
+    {
+        private static FieldInfo _targetLocalField;
+        private static bool _targetLocalFieldSearched;
+
+        private static Transform GetTargetLocal(object instance)
+        {
+            if (!_targetLocalFieldSearched)
+            {
+                _targetLocalFieldSearched = true;
+                _targetLocalField = instance.GetType().GetField("targetLocal",
+                    BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+            }
+            if (_targetLocalField == null) return null;
+            try { return _targetLocalField.GetValue(instance) as Transform; } catch { return null; }
+        }
+
+        public static void FixedUpdate_Prefix(object __instance)
+        {
+            var mb = __instance as MonoBehaviour;
+            if (mb == null) return;
+            if (mb.GetComponentInParent<P2Marker>() == null) return;
+
+            var targetLocal = GetTargetLocal(__instance);
+            if (targetLocal == null) return;
+
+            if (targetLocal.parent == mb.transform.parent)
+                targetLocal.SetParent(null, true);
         }
     }
 
