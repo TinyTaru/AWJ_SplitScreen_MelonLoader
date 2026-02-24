@@ -1142,6 +1142,41 @@ namespace AWJSplitScreen
             }
 
             if (v.sqrMagnitude > 1f) v.Normalize();
+
+            // Camera-relative remap:
+            // raw v.x/v.y means strafe/forward in camera space.
+            // Convert that desired world direction into the spider body's local move axes.
+            var mb = __instance as MonoBehaviour;
+            var p2Cam = SplitScreenMod.P2Camera;
+            if (mb != null && p2Cam != null && v.sqrMagnitude > 0.0001f)
+            {
+                var body = mb.transform;
+                var up = body.up;
+
+                var camForward = Vector3.ProjectOnPlane(p2Cam.transform.forward, up);
+                var camRight = Vector3.ProjectOnPlane(p2Cam.transform.right, up);
+
+                // Fallback if projection degenerates (e.g., camera aligned with up).
+                if (camForward.sqrMagnitude < 0.0001f || camRight.sqrMagnitude < 0.0001f)
+                {
+                    camForward = Vector3.ProjectOnPlane(p2Cam.transform.forward, Vector3.up);
+                    camRight = Vector3.ProjectOnPlane(p2Cam.transform.right, Vector3.up);
+                }
+
+                camForward = camForward.sqrMagnitude > 0.0001f ? camForward.normalized : body.forward;
+                camRight = camRight.sqrMagnitude > 0.0001f ? camRight.normalized : body.right;
+
+                var desiredWorld = (camRight * v.x) + (camForward * v.y);
+                if (desiredWorld.sqrMagnitude > 0.0001f)
+                    desiredWorld.Normalize();
+
+                v = new Vector2(
+                    Vector3.Dot(desiredWorld, body.right),
+                    Vector3.Dot(desiredWorld, body.forward));
+
+                if (v.sqrMagnitude > 1f) v.Normalize();
+            }
+
             try { fv.SetValue(__instance, v); } catch { }
         }
     }
