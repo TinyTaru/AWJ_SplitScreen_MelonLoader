@@ -23,12 +23,15 @@ namespace AWJSplitScreen
         internal static bool DebugCameraInput = false;
 
         internal static bool P2ShootHeld;              // computed each frame & from WebController.Update prefix
+        internal static bool P2JumpPressed;            // set in OnUpdate, consumed in FixedUpdate
         internal static bool InP2WebContext;           // one-shot actions
         internal static Transform P2InputTransform;
         internal static Camera P2Camera;
 
         internal static FieldInfo BodyMove_MoveInputField;
         internal static FieldInfo BodyMove_MoveVectorField;
+        internal static FieldInfo BodyMove_JumpInputField;
+        internal static MethodInfo BodyMove_InitializeJumpMethod;
 
         private const string Cat = "AWJ_SplitScreen";
         private static MelonPreferences_Category _prefs;
@@ -48,6 +51,8 @@ namespace AWJSplitScreen
         private static MelonPreferences_Entry<bool> _debugCameraInputPref;
 
         // P2 keyboard fallback keys
+        private const string P2JumpKeyProp = "spaceKey";
+        private const KeyCode P2JumpKeyFallback = KeyCode.Space;
         private const string P2ShootKeyProp = "uKey";
         private const KeyCode P2ShootKeyFallback = KeyCode.U;
         private const string P2DeleteKeyProp = "oKey";
@@ -135,6 +140,19 @@ namespace AWJSplitScreen
                 {
                     BodyMove_MoveInputField = FindBestMoveInputField(bodyMoveType);
                     BodyMove_MoveVectorField = FindFieldByName(bodyMoveType, "moveVector");
+                    BodyMove_JumpInputField = FindFieldByName(bodyMoveType, "jumpInput");
+                    BodyMove_InitializeJumpMethod = bodyMoveType.GetMethod("InitializeJump",
+                        BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+
+                    if (BodyMove_InitializeJumpMethod != null)
+                        h.Patch(BodyMove_InitializeJumpMethod,
+                            prefix: new HarmonyMethod(typeof(BodyMovementPatches), nameof(BodyMovementPatches.InitializeJump_Prefix)));
+
+                    var performJumping = bodyMoveType.GetMethod("PerformJumping",
+                        BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+                    if (performJumping != null)
+                        h.Patch(performJumping,
+                            prefix: new HarmonyMethod(typeof(BodyMovementPatches), nameof(BodyMovementPatches.PerformJumping_Prefix)));
 
                     var fixedUpdate = AccessTools.Method(bodyMoveType, "FixedUpdate");
                     if (fixedUpdate != null)
@@ -401,6 +419,8 @@ namespace AWJSplitScreen
             if (_enabled.Value)
             {
                 P2ShootHeld = InputCompat.IsP2ShootHeldNow(P2UseGamepad, P2GamepadIndex, P2TriggerThreshold, P2ShootKeyProp, P2ShootKeyFallback);
+                if (InputCompat.IsP2JumpPressedNow(P2UseGamepad, P2GamepadIndex))
+                    P2JumpPressed = true;
 
                 UpdateP2CameraLook();
                 InjectP2Web();
@@ -590,8 +610,6 @@ namespace AWJSplitScreen
                     }
 
                     // Second pass: wire up opposing-leg pairs (alternate-gait)
-                    // Original uses pairs: legs 0↔1, 2↔3, 4↔5 (or similar index grouping).
-                    // We replicate by pairing even↔odd index drivers.
                     for (int i = 0; i < drivers.Length; i++)
                     {
                         if (drivers[i] == null) continue;
@@ -952,6 +970,7 @@ namespace AWJSplitScreen
             P2Camera = null;
             InP2WebContext = false;
             P2ShootHeld = false;
+            P2JumpPressed = false;
         }
     }
 
@@ -996,6 +1015,11 @@ namespace AWJSplitScreen
         private bool _instantReset;
 
         private P2LegDriver[] _opposingLegs;
+
+        // BodyMovement.State property cached for jump detection
+        private PropertyInfo _bodyMovStateProp;
+        private object _bodyMovJumpingVal;
+        private bool _bodyMovStateCached;
 
         public bool IsAnimating => _lerp < 1f;
 
@@ -1059,9 +1083,49 @@ namespace AWJSplitScreen
                 UnityEngine.Object.Destroy(_targetLocal.gameObject);
         }
 
+        private bool IsBodyJumping()
+        {
+            if (_bodyMovement == null) return false;
+            if (!_bodyMovStateCached)
+            {
+                _bodyMovStateCached = true;
+                _bodyMovStateProp = _bodyMovement.GetType().GetProperty("State",
+                    System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public);
+                if (_bodyMovStateProp != null)
+                    try { _bodyMovJumpingVal = Enum.Parse(_bodyMovStateProp.PropertyType, "Jumping"); } catch { }
+            }
+            if (_bodyMovStateProp == null || _bodyMovJumpingVal == null) return false;
+            try { return _bodyMovStateProp.GetValue(_bodyMovement).Equals(_bodyMovJumpingVal); }
+            catch { return false; }
+        }
+
+        private bool _wasJumping;
+
         private void Update()
         {
             if (!_inited || _target == null || _targetLocal == null) return;
+            bool jumping = IsBodyJumping();
+
+            if (jumping)
+            {
+                // Mirror LegController.PerformJumpAnimation(): snap target below leg root
+                _targetLocal.position = transform.position - transform.up * 1f * _scale;
+                _oldTarget = _targetLocal.position;
+                _target.position = _targetLocal.position;
+                _target.rotation = transform.rotation;
+                _wasJumping = true;
+                return;
+            }
+
+            // Landing transition: snap legs to ground immediately
+            if (_wasJumping)
+            {
+                _wasJumping = false;
+                _resetLeg = true;
+                _instantReset = true;
+                _lerp = 1f;
+            }
+
             PerformLegAnimation(Time.deltaTime);
             PerformWalking();
         }
@@ -1239,6 +1303,225 @@ namespace AWJSplitScreen
             return mb.GetComponentInParent<P2Marker>() != null;
         }
 
+        // PerformJumping cached fields
+        private static bool _pjFieldsCached;
+        private static FieldInfo _fPjJumpTimer, _fPjRb, _fPjState, _fPjLastRotation;
+        private static FieldInfo _fPjMoveInput, _fPjPitchAngle;
+        private static FieldInfo _fPjLandingRotSmooth, _fPjJumpingRotSmooth;
+        private static FieldInfo _fPjLandingOffset, _fPjLandingRadius;
+        private static FieldInfo _fPjAerialThresh, _fPjAerialSpeedLR, _fPjAerialSpeedFB;
+        private static FieldInfo _fPjWhatIsGround;
+        private static MethodInfo _mPjPerformLanding;
+        private static object _walkingStateValue;
+
+        private static void CachePjFields(object instance)
+        {
+            if (_pjFieldsCached) return;
+            _pjFieldsCached = true;
+            var t = instance.GetType();
+            _fPjJumpTimer      = t.GetField("jumpTimer",                    BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+            _fPjRb             = t.GetField("rb",                           BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+            _fPjState          = t.GetField("state",                        BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+            _fPjLastRotation   = t.GetField("lastRotation",                 BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+            _fPjMoveInput      = t.GetField("moveInput",                    BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+            _fPjPitchAngle     = t.GetField("pitchAngle",                   BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+            _fPjLandingRotSmooth  = t.GetField("landingRotationSmoothness", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+            _fPjJumpingRotSmooth  = t.GetField("jumpingRotationSmoothness", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+            _fPjLandingOffset  = t.GetField("landingTriggerOffset",         BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+            _fPjLandingRadius  = t.GetField("landingTriggerRadius",         BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+            _fPjAerialThresh   = t.GetField("aerialAccelerationThreshold",  BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+            _fPjAerialSpeedLR  = t.GetField("aerialControlSpeedLeftRight",  BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+            _fPjAerialSpeedFB  = t.GetField("aerialControlSpeedForwardBackwards", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+            _fPjWhatIsGround   = t.GetField("whatIsGround",                 BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public)
+                               ?? t.GetField("WhatIsGround",                BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+            _mPjPerformLanding = t.GetMethod("PerformLanding",              BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+            if (_fPjState != null)
+                try { _walkingStateValue = Enum.Parse(_fPjState.FieldType, "Walking"); } catch { }
+        }
+
+        private static T PjGet<T>(FieldInfo f, object inst, T fallback = default)
+        {
+            if (f == null) return fallback;
+            try { return (T)f.GetValue(inst); } catch { return fallback; }
+        }
+
+        public static bool PerformJumping_Prefix(object __instance)
+        {
+            if (!IsP2(__instance)) return true; // P1 uses original
+
+            CachePjFields(__instance);
+
+            try
+            {
+                var mb = __instance as MonoBehaviour;
+                if (mb == null) return false;
+
+                // --- Tick jump timer ---
+                float jumpTimer = PjGet<float>(_fPjJumpTimer, __instance);
+                jumpTimer -= Time.fixedDeltaTime;
+                _fPjJumpTimer?.SetValue(__instance, jumpTimer);
+
+                var rb = PjGet<Rigidbody>(_fPjRb, __instance);
+                if (rb == null) return false;
+
+                // --- SphereCast toward velocity (same as original) ---
+                bool hitGround = false;
+                RaycastHit hitInfo = default;
+                Vector3 vel = rb.linearVelocity;
+                if (vel.sqrMagnitude > 0.001f)
+                    hitGround = Physics.SphereCast(new Ray(mb.transform.position, vel.normalized),
+                        0.5f, out hitInfo, 5f,
+                        PjGet<LayerMask>(_fPjWhatIsGround, __instance, Physics.DefaultRaycastLayers));
+
+                // --- Air control using P2InputTransform ---
+                Vector3 inputTrans = SplitScreenMod.P2InputTransform != null
+                    ? SplitScreenMod.P2InputTransform.InverseTransformDirection(vel)
+                    : Vector3.zero;
+                inputTrans.y = 0f;
+                Vector2 moveIn = PjGet<Vector2>(_fPjMoveInput, __instance);
+                float aerialThresh  = PjGet<float>(_fPjAerialThresh,  __instance, 5f);
+                float aerialSpeedLR = PjGet<float>(_fPjAerialSpeedLR, __instance, 2f);
+                float aerialSpeedFB = PjGet<float>(_fPjAerialSpeedFB, __instance, 2f);
+                if (!hitGround && SplitScreenMod.P2InputTransform != null)
+                {
+                    Vector3 airForce = Vector3.zero;
+                    if (Mathf.Abs(inputTrans.x) < aerialThresh ||
+                        (inputTrans.x < -aerialThresh && moveIn.x > 0f) ||
+                        (inputTrans.x >  aerialThresh && moveIn.x < 0f))
+                        airForce += SplitScreenMod.P2InputTransform.right * moveIn.x * aerialSpeedLR;
+                    if (Mathf.Abs(inputTrans.z) < aerialThresh ||
+                        (inputTrans.z < -aerialThresh && moveIn.y > 0f) ||
+                        (inputTrans.z >  aerialThresh && moveIn.y < 0f))
+                        airForce += SplitScreenMod.P2InputTransform.forward * moveIn.y * aerialSpeedFB;
+                    rb.linearVelocity += Vector3.ClampMagnitude(airForce, aerialSpeedFB) * Time.fixedDeltaTime;
+                    vel = rb.linearVelocity; // refresh after air control
+                }
+
+                // --- Rotation (mirror original math) ---
+                Vector3 normalized = vel.sqrMagnitude > 0.001f
+                    ? Vector3.Cross(Vector3.up, vel.normalized).normalized
+                    : mb.transform.right;
+                float pitchAngle = PjGet<float>(_fPjPitchAngle, __instance, 0f);
+                Vector3 forward2  = Quaternion.AngleAxis(-pitchAngle, normalized) * vel.normalized;
+                Vector3 upwards   = Vector3.Cross(normalized, -forward2);
+
+                bool landing = jumpTimer <= 0f && hitGround;
+                if (landing)
+                {
+                    upwards  = hitInfo.normal;
+                    forward2 = Vector3.Cross(normalized, hitInfo.normal);
+                }
+
+                if (vel.sqrMagnitude > 0f)
+                {
+                    float smoothness = landing
+                        ? PjGet<float>(_fPjLandingRotSmooth,  __instance, 2f)
+                        : PjGet<float>(_fPjJumpingRotSmooth, __instance, 4f);
+                    Quaternion targetRot = Quaternion.LookRotation(forward2, upwards);
+                    Quaternion lastRot   = PjGet<Quaternion>(_fPjLastRotation, __instance, mb.transform.rotation);
+                    mb.transform.rotation = Quaternion.Slerp(lastRot, targetRot, 1f / (1f + smoothness));
+                }
+                _fPjLastRotation?.SetValue(__instance, mb.transform.rotation);
+
+                // --- Early return while still airborne ---
+                if (jumpTimer > 0f) return false;
+
+                // --- Landing trigger (mirror original) ---
+                float lOffset = PjGet<float>(_fPjLandingOffset, __instance, 0f);
+                float lRadius = PjGet<float>(_fPjLandingRadius, __instance, 0.5f);
+                LayerMask groundMask = PjGet<LayerMask>(_fPjWhatIsGround, __instance, Physics.DefaultRaycastLayers);
+                LayerMask landMask   = (int)groundMask | LayerMask.GetMask("Movable");
+                if (Physics.CheckSphere(mb.transform.position + mb.transform.up * lOffset, lRadius, landMask))
+                {
+                    if (_mPjPerformLanding != null)
+                        try { _mPjPerformLanding.Invoke(__instance, null); } catch { }
+                    else
+                    {
+                        // Fallback: manually set state + MLC
+                        if (_fPjState != null && _walkingStateValue != null)
+                            _fPjState.SetValue(__instance, _walkingStateValue);
+                        SetMlcState(__instance, _mlcWalkingState);
+                    }
+                }
+            }
+            catch { }
+
+            return false; // Always skip original for P2
+        }
+
+        private static FieldInfo _jumpCheckDistField;
+        private static bool _jumpCheckDistSearched;
+        private static bool _inInitializeJumpOverride;
+        // MLC state fields cached for leg pose during jump
+        private static FieldInfo _fMlcRef;
+        private static PropertyInfo _pMlcState;
+        private static object _mlcJumpingState;
+        private static object _mlcWalkingState;
+        private static bool _mlcCached;
+
+        private static void CacheMlcFields(object bodyMovInstance)
+        {
+            if (_mlcCached) return;
+            _mlcCached = true;
+            var t = bodyMovInstance.GetType();
+            _fMlcRef = t.GetField("masterLegController",
+                BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+            if (_fMlcRef == null) return;
+            var mlc = _fMlcRef.GetValue(bodyMovInstance);
+            if (mlc == null) return;
+            _pMlcState = mlc.GetType().GetProperty("State",
+                BindingFlags.Instance | BindingFlags.Public);
+            if (_pMlcState == null) return;
+            var stateType = _pMlcState.PropertyType;
+            try { _mlcJumpingState = Enum.Parse(stateType, "Jumping"); } catch { }
+            try { _mlcWalkingState = Enum.Parse(stateType, "Walking"); } catch { }
+        }
+
+        private static void SetMlcState(object bodyMovInstance, object state)
+        {
+            if (_fMlcRef == null || _pMlcState == null || state == null) return;
+            var mlc = _fMlcRef.GetValue(bodyMovInstance);
+            if (mlc != null)
+                try { _pMlcState.SetValue(mlc, state); } catch { }
+        }
+
+        public static bool InitializeJump_Prefix(object __instance)
+        {
+            // Skip if we're already inside our own override call (re-entrance guard)
+            if (_inInitializeJumpOverride) return true;
+            if (!IsP2(__instance)) return true;
+
+            if (!_jumpCheckDistSearched)
+            {
+                _jumpCheckDistSearched = true;
+                _jumpCheckDistField = __instance.GetType().GetField("jumpCheckDistance",
+                    BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+            }
+            CacheMlcFields(__instance);
+
+            float original = 0f;
+            bool patched = false;
+            if (_jumpCheckDistField != null)
+            {
+                try { original = (float)_jumpCheckDistField.GetValue(__instance); patched = true; } catch { }
+                try { _jumpCheckDistField.SetValue(__instance, 0f); } catch { }
+            }
+
+            // Call original with zeroed jumpCheckDistance so SphereCast never blocks the jump
+            _inInitializeJumpOverride = true;
+            try { SplitScreenMod.BodyMove_InitializeJumpMethod.Invoke(__instance, null); } catch { }
+            _inInitializeJumpOverride = false;
+
+            if (patched && _jumpCheckDistField != null)
+                try { _jumpCheckDistField.SetValue(__instance, original); } catch { }
+
+            // Force leg jump pose — original sets masterLegController.State=Jumping inside
+            // InitializeJump, but P2's MLC may be null if it got destroyed. Set it explicitly.
+            SetMlcState(__instance, _mlcJumpingState);
+
+            return false;
+        }
+
         public static bool CallbackContextFilter_Prefix(object __instance, object __0)
         {
             if (!SplitScreenMod.FilterP1FromP2Gamepad) return true;
@@ -1252,9 +1535,44 @@ namespace AWJSplitScreen
             return true;
         }
 
+        // State field cache for jump ground-check
+        private static bool _stateFieldCached;
+        private static FieldInfo _fStateForJump;
+        private static object _jumpingStateForJump;
+
+        private static bool IsAlreadyJumping(object instance)
+        {
+            if (!_stateFieldCached)
+            {
+                _stateFieldCached = true;
+                _fStateForJump = instance.GetType().GetField("state",
+                    BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+                if (_fStateForJump != null)
+                    try { _jumpingStateForJump = Enum.Parse(_fStateForJump.FieldType, "Jumping"); } catch { }
+            }
+            if (_fStateForJump == null || _jumpingStateForJump == null) return false;
+            try { return _fStateForJump.GetValue(instance).Equals(_jumpingStateForJump); } catch { return false; }
+        }
+
         public static void FixedUpdate_Prefix(object __instance)
         {
-            if (!IsP2(__instance) && SplitScreenMod.FilterP1FromP2Gamepad && SplitScreenMod.P2UseGamepad)
+            if (IsP2(__instance))
+            {
+                // Consume the jump flag — guard against mid-air jumps
+                if (SplitScreenMod.P2JumpPressed)
+                {
+                    SplitScreenMod.P2JumpPressed = false;
+                    // Only jump if currently Walking (not already airborne)
+                    if (!IsAlreadyJumping(__instance))
+                    {
+                        // Trigger InitializeJump via the existing prefix patch
+                        // (InitializeJump_Prefix zeros jumpCheckDistance so it always fires)
+                        if (SplitScreenMod.BodyMove_InitializeJumpMethod != null)
+                            try { SplitScreenMod.BodyMove_InitializeJumpMethod.Invoke(__instance, null); } catch { }
+                    }
+                }
+            }
+            else if (SplitScreenMod.FilterP1FromP2Gamepad && SplitScreenMod.P2UseGamepad)
             {
                 var p2ls = InputCompat.GetP2LeftStick(SplitScreenMod.P2GamepadIndex, SplitScreenMod.P2Deadzone);
                 if (p2ls.sqrMagnitude > 0f)
@@ -1533,6 +1851,7 @@ namespace AWJSplitScreen
         private static PropertyInfo _rightStickProp;
         private static PropertyInfo _rightTriggerProp;
         private static PropertyInfo _buttonSouthProp;
+        private static PropertyInfo _buttonNorthProp;
         private static PropertyInfo _buttonEastProp;
         private static PropertyInfo _rightShoulderProp;
 
@@ -1580,6 +1899,7 @@ namespace AWJSplitScreen
                 _rightStickProp = _gamepadType.GetProperty("rightStick", BindingFlags.Public | BindingFlags.Instance);
                 _rightTriggerProp = _gamepadType.GetProperty("rightTrigger", BindingFlags.Public | BindingFlags.Instance);
                 _buttonSouthProp = _gamepadType.GetProperty("buttonSouth", BindingFlags.Public | BindingFlags.Instance);
+                _buttonNorthProp = _gamepadType.GetProperty("buttonNorth", BindingFlags.Public | BindingFlags.Instance);
                 _buttonEastProp = _gamepadType.GetProperty("buttonEast", BindingFlags.Public | BindingFlags.Instance);
                 _rightShoulderProp = _gamepadType.GetProperty("rightShoulder", BindingFlags.Public | BindingFlags.Instance);
 
@@ -1817,6 +2137,15 @@ namespace AWJSplitScreen
             var gp = GetGamepadAtIndex(index);
             float rt = ReadAxis(gp, _rightTriggerProp);
             return kb || (rt >= triggerThreshold);
+        }
+
+        public static bool IsP2JumpPressedNow(bool useGamepad, int index)
+        {
+            bool kb = Down("backslashKey", KeyCode.Backslash);
+            if (!useGamepad) return kb;
+            var gp = GetGamepadAtIndex(index);
+            bool north = ReadButtonDown(gp, _buttonNorthProp);
+            return kb || north;
         }
 
         public static bool IsP2AttachPressedNow(bool useGamepad, int index, string kbProp, KeyCode kbFallback)
