@@ -533,10 +533,11 @@ namespace AWJSplitScreen
                 var mlcType3 = AccessTools.TypeByName("_Scripts.Spider.MasterLegController");
                 if (legType3 != null)
                 {
-                    var targetF3 = legType3.GetField("target", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
-                    var offsetF3 = legType3.GetField("startingOffset", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
-                    var centerF3 = legType3.GetField("center", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
-                    var opposingF3 = legType3.GetField("opposingLegs", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+                    var targetF3     = legType3.GetField("target",        BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+                    var offsetF3     = legType3.GetField("startingOffset", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+                    var centerF3     = legType3.GetField("center",         BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+                    var opposingF3   = legType3.GetField("opposingLegs",   BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+                    var targetJumpF3 = legType3.GetField("targetJump",     BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
 
                     // Get params from MasterLegController
                     LayerMask whatIsGround = default;
@@ -591,9 +592,10 @@ namespace AWJSplitScreen
                     {
                         var lc = p2Legs[i];
                         var go = (lc as Component).gameObject;
-                        var target3 = targetF3?.GetValue(lc) as Transform;
-                        var offset3 = offsetF3 != null ? (Vector3)offsetF3.GetValue(lc) : Vector3.zero;
-                        var center3 = centerF3?.GetValue(lc) as Transform;
+                        var target3     = targetF3?.GetValue(lc) as Transform;
+                        var offset3     = offsetF3 != null ? (Vector3)offsetF3.GetValue(lc) : Vector3.zero;
+                        var center3     = centerF3?.GetValue(lc) as Transform;
+                        var targetJump3 = targetJumpF3?.GetValue(lc) as Transform;
 
                         UnityEngine.Object.DestroyImmediate(lc);
 
@@ -604,7 +606,8 @@ namespace AWJSplitScreen
                                 p2BodyMovement, moveVecField,
                                 whatIsGround, sphereRadius,
                                 rayUpOffset, rayLength, stepDist,
-                                stepTime, stepHeight, tipHeight, newTargetDist);
+                                stepTime, stepHeight, tipHeight, newTargetDist,
+                                targetJump3);
                             drivers[i] = driver;
                         }
                     }
@@ -1025,16 +1028,21 @@ namespace AWJSplitScreen
 
         public void SetOpposingLegs(P2LegDriver[] legs) { _opposingLegs = legs; }
 
+        // Jump pose transform (mirrors LegController.targetJump)
+        private Transform _targetJump;
+
         public void Init(Transform target, Vector3 startingOffset, Transform center,
             Transform bodyTransform, Component bodyMovement, FieldInfo moveVecField,
             LayerMask whatIsGround, float sphereRadius,
             float rayUpOffset, float rayLength, float stepDist,
-            float stepTime, float stepHeight, float tipHeight, float newTargetDist)
+            float stepTime, float stepHeight, float tipHeight, float newTargetDist,
+            Transform targetJump = null)
         {
             _target = target;
             _center = center;
             _bodyTransform = bodyTransform;
             _bodyMovement = bodyMovement;
+            _targetJump = targetJump;
             _moveVecField = moveVecField;
             _whatIsGround = whatIsGround;
             _sphereRadius = sphereRadius;
@@ -1108,11 +1116,21 @@ namespace AWJSplitScreen
 
             if (jumping)
             {
-                // Mirror LegController.PerformJumpAnimation(): snap target below leg root
-                _targetLocal.position = transform.position - transform.up * 1f * _scale;
-                _oldTarget = _targetLocal.position;
-                _target.position = _targetLocal.position;
-                _target.rotation = transform.rotation;
+                // Mirror LegController.PerformJumpAnimation() exactly
+                if (_targetJump != null)
+                {
+                    _targetLocal.position = _targetJump.position;
+                    _oldTarget = _targetLocal.position;
+                    _target.position = _targetJump.position;
+                    _target.rotation = _targetJump.rotation;
+                }
+                else
+                {
+                    _targetLocal.position = transform.position - transform.up * 1f * _scale;
+                    _oldTarget = _targetLocal.position;
+                    _target.position = _targetLocal.position;
+                    _target.rotation = transform.rotation;
+                }
                 _wasJumping = true;
                 return;
             }
