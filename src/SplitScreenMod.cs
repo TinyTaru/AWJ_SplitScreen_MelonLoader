@@ -1329,6 +1329,7 @@ namespace AWJSplitScreen
         private static FieldInfo _fPjLandingOffset, _fPjLandingRadius;
         private static FieldInfo _fPjAerialThresh, _fPjAerialSpeedLR, _fPjAerialSpeedFB;
         private static FieldInfo _fPjWhatIsGround;
+        private static FieldInfo _fPjMovementTimer, _fPjMovementStopTime;
         private static MethodInfo _mPjPerformLanding;
         private static object _walkingStateValue;
 
@@ -1352,6 +1353,8 @@ namespace AWJSplitScreen
             _fPjAerialSpeedFB  = t.GetField("aerialControlSpeedForwardBackwards", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
             _fPjWhatIsGround   = t.GetField("whatIsGround",                 BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public)
                                ?? t.GetField("WhatIsGround",                BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+            _fPjMovementTimer     = t.GetField("movementTimer",     BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+            _fPjMovementStopTime  = t.GetField("movementStopTime",  BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
             _mPjPerformLanding = t.GetMethod("PerformLanding",              BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
             if (_fPjState != null)
                 try { _walkingStateValue = Enum.Parse(_fPjState.FieldType, "Walking"); } catch { }
@@ -1374,10 +1377,12 @@ namespace AWJSplitScreen
                 var mb = __instance as MonoBehaviour;
                 if (mb == null) return false;
 
-                // --- Tick jump timer ---
+                // --- Tick jump timer + keep movementTimer alive (mirrors original) ---
                 float jumpTimer = PjGet<float>(_fPjJumpTimer, __instance);
                 jumpTimer -= Time.fixedDeltaTime;
                 _fPjJumpTimer?.SetValue(__instance, jumpTimer);
+                float movStopTime = PjGet<float>(_fPjMovementStopTime, __instance, 0f);
+                _fPjMovementTimer?.SetValue(__instance, movStopTime);
 
                 var rb = PjGet<Rigidbody>(_fPjRb, __instance);
                 if (rb == null) return false;
@@ -1391,26 +1396,39 @@ namespace AWJSplitScreen
                         0.5f, out hitInfo, 5f,
                         PjGet<LayerMask>(_fPjWhatIsGround, __instance, Physics.DefaultRaycastLayers));
 
-                // --- Air control using P2InputTransform ---
-                Vector3 inputTrans = SplitScreenMod.P2InputTransform != null
-                    ? SplitScreenMod.P2InputTransform.InverseTransformDirection(vel)
+                // --- Air control: build a flat yaw-only reference (matches CameraController.InputTransform) ---
+                // Project camera forward onto horizontal plane to strip pitch — camera height won't affect threshold
+                Vector3 flatFwd = Vector3.zero, flatRight = Vector3.zero;
+                bool hasCamRef = false;
+                if (SplitScreenMod.P2Camera != null)
+                {
+                    flatFwd   = Vector3.ProjectOnPlane(SplitScreenMod.P2Camera.transform.forward, Vector3.up);
+                    flatRight = Vector3.ProjectOnPlane(SplitScreenMod.P2Camera.transform.right,   Vector3.up);
+                    if (flatFwd.sqrMagnitude > 0.0001f && flatRight.sqrMagnitude > 0.0001f)
+                    {
+                        flatFwd.Normalize(); flatRight.Normalize();
+                        hasCamRef = true;
+                    }
+                }
+                // Project velocity onto flat camera axes for threshold check
+                Vector3 inputTrans = hasCamRef
+                    ? new Vector3(Vector3.Dot(vel, flatRight), 0f, Vector3.Dot(vel, flatFwd))
                     : Vector3.zero;
-                inputTrans.y = 0f;
                 Vector2 moveIn = PjGet<Vector2>(_fPjMoveInput, __instance);
                 float aerialThresh  = PjGet<float>(_fPjAerialThresh,  __instance, 5f);
                 float aerialSpeedLR = PjGet<float>(_fPjAerialSpeedLR, __instance, 2f);
                 float aerialSpeedFB = PjGet<float>(_fPjAerialSpeedFB, __instance, 2f);
-                if (!hitGround && SplitScreenMod.P2InputTransform != null)
+                if (!hitGround && hasCamRef)
                 {
                     Vector3 airForce = Vector3.zero;
                     if (Mathf.Abs(inputTrans.x) < aerialThresh ||
                         (inputTrans.x < -aerialThresh && moveIn.x > 0f) ||
                         (inputTrans.x >  aerialThresh && moveIn.x < 0f))
-                        airForce += SplitScreenMod.P2InputTransform.right * moveIn.x * aerialSpeedLR;
+                        airForce += flatRight * moveIn.x * aerialSpeedLR;
                     if (Mathf.Abs(inputTrans.z) < aerialThresh ||
                         (inputTrans.z < -aerialThresh && moveIn.y > 0f) ||
                         (inputTrans.z >  aerialThresh && moveIn.y < 0f))
-                        airForce += SplitScreenMod.P2InputTransform.forward * moveIn.y * aerialSpeedFB;
+                        airForce += flatFwd * moveIn.y * aerialSpeedFB;
                     rb.linearVelocity += Vector3.ClampMagnitude(airForce, aerialSpeedFB) * Time.fixedDeltaTime;
                     vel = rb.linearVelocity; // refresh after air control
                 }
@@ -1587,6 +1605,27 @@ namespace AWJSplitScreen
                         // (InitializeJump_Prefix zeros jumpCheckDistance so it always fires)
                         if (SplitScreenMod.BodyMove_InitializeJumpMethod != null)
                             try { SplitScreenMod.BodyMove_InitializeJumpMethod.Invoke(__instance, null); } catch { }
+                    }
+                }
+
+                // While airborne, inject raw stick as moveInput so PerformJumping_Prefix can apply aerial forces
+                if (IsAlreadyJumping(__instance))
+                {
+                    var fi = SplitScreenMod.BodyMove_MoveInputField;
+                    if (fi != null)
+                    {
+                        Vector2 raw = Vector2.zero;
+                        if (InputCompat.Held_J()) raw.x -= 1f;
+                        if (InputCompat.Held_L()) raw.x += 1f;
+                        if (InputCompat.Held_K()) raw.y -= 1f;
+                        if (InputCompat.Held_I()) raw.y += 1f;
+                        if (SplitScreenMod.P2UseGamepad)
+                        {
+                            var gp = InputCompat.GetP2LeftStick(SplitScreenMod.P2GamepadIndex, SplitScreenMod.P2Deadzone);
+                            raw += new Vector2(gp.x, gp.y);
+                        }
+                        if (raw.sqrMagnitude > 1f) raw.Normalize();
+                        try { fi.SetValue(__instance, raw); } catch { }
                     }
                 }
             }
