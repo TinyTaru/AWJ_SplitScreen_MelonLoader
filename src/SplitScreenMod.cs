@@ -1049,20 +1049,29 @@ namespace AWJSplitScreen
             var col = _p2TargetDot.GetComponent<Collider>();
             if (col != null) UnityEngine.Object.Destroy(col);
 
-            // Bright unlit red material — visible at distance
+            // Bright unlit red material that renders on top of everything.
+            // We set ZTest=Always and renderQueue=Overlay so the dot is never
+            // hidden behind P2's own mesh regardless of depth buffer state.
             var rend = _p2TargetDot.GetComponent<Renderer>();
             if (rend != null)
             {
-                // Try Unlit/Color first (solid color), fallback to Sprites/Default
+                // Try shaders in order of preference for "always on top" rendering
                 var shader = Shader.Find("Unlit/Color");
                 if (shader == null) shader = Shader.Find("Sprites/Default");
                 if (shader == null) shader = Shader.Find("Standard");
                 if (shader == null) shader = rend.material.shader;
+
                 var mat = new Material(shader);
                 mat.color = new Color(1f, 0f, 0f, 1f);
-                // Try to set _Color property directly for Standard shader
                 try { mat.SetColor("_Color", new Color(1f, 0f, 0f, 1f)); } catch { }
                 try { mat.SetColor("_EmissionColor", new Color(1f, 0f, 0f, 1f)); } catch { }
+
+                // Force ZTest=Always so the dot draws over any occluding geometry
+                // (including P2's own body which sits between the camera and the target).
+                try { mat.SetInt("_ZTest", (int)UnityEngine.Rendering.CompareFunction.Always); } catch { }
+                // Render in the Overlay queue (>= 4000) so it draws last, on top of everything
+                mat.renderQueue = 4000;
+
                 rend.material = mat;
                 rend.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
                 rend.receiveShadows = false;
