@@ -74,14 +74,11 @@ namespace AWJSplitScreen
         private float _p2CamDistance;
         private bool _p2CamRigInited;
 
-        // WebController calls
+        // WebController — P1's singleton, passed to P2WebManager for cloning
         private Component _webController;
-        private MethodInfo _wcMobileShootWebBool;
-        private MethodInfo _wcMobileDeleteWeb;
-        private MethodInfo _wcAttachWeb;
-        private MethodInfo _wcReleaseWebBool;
 
-        private bool _p2ShootHeldPrev;
+        // Independent P2 web system
+        private P2WebManager _p2WebManager;
 
         public override void OnInitializeMelon()
         {
@@ -109,7 +106,7 @@ namespace AWJSplitScreen
             SceneManager.sceneLoaded += (_, __) => MelonCoroutines.Start(DeferredSetup());
 
             LoggerInstance.Msg("AWJ Split Screen + P2 Inject v0.2.2 loaded.");
-            LoggerInstance.Msg("F9 split, F10 orientation | P2 Move: IJKL or Gamepad LStick | P2 Look: N/M or RStickX | P2 Web: U/RT shoot, P/A attach, O/B delete, RightCtrl/RB release.");
+            LoggerInstance.Msg("F9 split, F10 orientation | P2 Move: IJKL or Gamepad LStick | P2 Look: N/M or RStickX | P2 Jump: A | P2 Web: U/RT shoot, P/LT attach, O/B delete, RightCtrl/RB release.");
             LoggerInstance.Msg("Tip: If both controllers still move P1, ensure FilterP1FromP2Gamepad=true and P2_GamepadIndex is the second pad (usually 1).");
         }
 
@@ -212,15 +209,31 @@ namespace AWJSplitScreen
                 var webType = AccessTools.TypeByName("_Scripts.Singletons.WebController");
                 if (webType != null)
                 {
-                    var wcUpdate = AccessTools.Method(webType, "Update");
-                    if (wcUpdate != null)
-                        h.Patch(wcUpdate, prefix: new HarmonyMethod(typeof(WebControllerPatches), nameof(WebControllerPatches.WebControllerUpdate_Prefix)));
+                    // Dump all properties and methods for diagnostics
+                    var allProps = webType.GetProperties(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                    LoggerInstance.Msg("[WebController] Properties (" + allProps.Length + "):");
+                    for (int i = 0; i < allProps.Length; i++)
+                        LoggerInstance.Msg("  prop: " + allProps[i].Name + " -> " + allProps[i].PropertyType.Name);
 
-                    var wcFixed = AccessTools.Method(webType, "FixedUpdate");
-                    if (wcFixed != null)
-                        h.Patch(wcFixed, prefix: new HarmonyMethod(typeof(WebControllerPatches), nameof(WebControllerPatches.WebControllerUpdate_Prefix)));
+                    var allMethods = webType.GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly);
+                    LoggerInstance.Msg("[WebController] Methods (" + allMethods.Length + "):");
+                    for (int i = 0; i < allMethods.Length; i++)
+                    {
+                        var prms = allMethods[i].GetParameters();
+                        string pStr = "";
+                        for (int j = 0; j < prms.Length; j++)
+                            pStr += (j > 0 ? ", " : "") + prms[j].ParameterType.Name + " " + prms[j].Name;
+                        LoggerInstance.Msg("  method: " + allMethods[i].Name + "(" + pStr + ") -> " + allMethods[i].ReturnType.Name);
+                    }
 
-                    var getStart = AccessTools.Method(webType, "get_WebStartPoint");
+                    // NOTE: We intentionally do NOT patch Update/FixedUpdate with a P2ShootHeld setter.
+                    // P2WebManager sets context flags only around its own explicit invocations
+                    // so P1's targeting is never corrupted.
+
+                    // Try property getter first, then direct method
+                    var getStart = AccessTools.PropertyGetter(webType, "WebStartPoint");
+                    if (getStart == null) getStart = AccessTools.Method(webType, "get_WebStartPoint");
+                    LoggerInstance.Msg("[WebController] get_WebStartPoint: " + (getStart != null) + (getStart != null ? " ret=" + getStart.ReturnType.Name : ""));
                     if (getStart != null)
                     {
                         if (getStart.ReturnType == typeof(Transform))
@@ -229,10 +242,13 @@ namespace AWJSplitScreen
                             h.Patch(getStart, prefix: new HarmonyMethod(typeof(WebControllerPatches), nameof(WebControllerPatches.WebStartPointVector3_Prefix)));
                     }
 
-                    var getDir = AccessTools.Method(webType, "get_WebDirection");
+                    var getDir = AccessTools.PropertyGetter(webType, "WebDirection");
+                    if (getDir == null) getDir = AccessTools.Method(webType, "get_WebDirection");
+                    LoggerInstance.Msg("[WebController] get_WebDirection: " + (getDir != null) + (getDir != null ? " ret=" + getDir.ReturnType.Name : ""));
                     if (getDir != null && getDir.ReturnType == typeof(Vector3))
                         h.Patch(getDir, prefix: new HarmonyMethod(typeof(WebControllerPatches), nameof(WebControllerPatches.WebDirectionVector3_Prefix)));
 
+                    int callbackCount = 0;
                     var wms = webType.GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
                     for (int i = 0; i < wms.Length; i++)
                     {
@@ -246,10 +262,28 @@ namespace AWJSplitScreen
                             (pt != null && pt.FullName != null && pt.FullName.IndexOf("CallbackContext", StringComparison.OrdinalIgnoreCase) >= 0))
                         {
                             h.Patch(m, prefix: new HarmonyMethod(typeof(WebControllerPatches), nameof(WebControllerPatches.CallbackContextFilter_Prefix)));
+                            callbackCount++;
                         }
                     }
 
-                    LoggerInstance.Msg("Patched WebController: Update sync + WebStartPoint/WebDirection + CallbackContext filter.");
+                    LoggerInstance.Msg("Patched WebController: Update/Fixed + WebStartPoint/WebDirection + " + callbackCount + " CallbackContext filters.");
+
+                    // CheckForWebTarget — separate try/catch because signature is void(float)
+                    try
+                    {
+                        var checkForWebTarget = AccessTools.Method(webType, "CheckForWebTarget");
+                        LoggerInstance.Msg("[WebController] CheckForWebTarget: " + (checkForWebTarget != null)
+                            + (checkForWebTarget != null ? " ret=" + checkForWebTarget.ReturnType.Name + " params=" + checkForWebTarget.GetParameters().Length : ""));
+                        if (checkForWebTarget != null)
+                        {
+                            h.Patch(checkForWebTarget, prefix: new HarmonyMethod(typeof(WebControllerPatches), nameof(WebControllerPatches.CheckForWebTarget_Prefix)));
+                            LoggerInstance.Msg("Patched WebController.CheckForWebTarget.");
+                        }
+                    }
+                    catch (Exception exCfwt)
+                    {
+                        LoggerInstance.Warning("CheckForWebTarget patch failed (non-fatal): " + exCfwt);
+                    }
                 }
             }
             catch (Exception ex)
@@ -257,7 +291,7 @@ namespace AWJSplitScreen
                 LoggerInstance.Warning("WebController patch block failed (non-fatal): " + ex);
             }
 
-            // CameraController InputTransform getter
+            // CameraController InputTransform getter + CallbackContext filter
             try
             {
                 var camType = AccessTools.TypeByName("_Scripts.Singletons.CameraController");
@@ -418,12 +452,14 @@ namespace AWJSplitScreen
 
             if (_enabled.Value)
             {
-                P2ShootHeld = InputCompat.IsP2ShootHeldNow(P2UseGamepad, P2GamepadIndex, P2TriggerThreshold, P2ShootKeyProp, P2ShootKeyFallback);
                 if (InputCompat.IsP2JumpPressedNow(P2UseGamepad, P2GamepadIndex))
                     P2JumpPressed = true;
 
                 UpdateP2CameraLook();
-                InjectP2Web();
+
+                // Drive P2's independent web system
+                if (_p2WebManager != null)
+                    _p2WebManager.DriveInput();
             }
         }
 
@@ -479,10 +515,6 @@ namespace AWJSplitScreen
         private void CacheWebController()
         {
             _webController = null;
-            _wcMobileShootWebBool = null;
-            _wcMobileDeleteWeb = null;
-            _wcAttachWeb = null;
-            _wcReleaseWebBool = null;
 
             var t = AccessTools.TypeByName("_Scripts.Singletons.WebController");
             if (t == null) return;
@@ -491,19 +523,7 @@ namespace AWJSplitScreen
             if (all != null && all.Length > 0)
                 _webController = all[0] as Component;
 
-            if (_webController == null) return;
-
-            var mt = _webController.GetType();
-            _wcMobileShootWebBool = FindMethod_Bool(mt, "MobileShootWeb");
-            _wcMobileDeleteWeb = FindMethod_NoArgs(mt, "MobileDeleteWeb");
-            _wcAttachWeb = FindMethod_NoArgs(mt, "AttachWeb");
-            _wcReleaseWebBool = FindMethod_Bool(mt, "ReleaseWeb");
-
-            LoggerInstance.Msg("WebController cached: " + (_webController != null) +
-                               " | MobileShootWeb=" + (_wcMobileShootWebBool != null) +
-                               " | MobileDeleteWeb=" + (_wcMobileDeleteWeb != null) +
-                               " | AttachWeb=" + (_wcAttachWeb != null) +
-                               " | ReleaseWeb=" + (_wcReleaseWebBool != null));
+            LoggerInstance.Msg("WebController cached: " + (_webController != null));
         }
 
         private void SetupSecondSpider()
@@ -754,8 +774,28 @@ namespace AWJSplitScreen
                 _p2CamRigInited = false;
             }
 
+            // Initialize independent P2 web system
+            try
+            {
+                if (_webController != null && P2Camera != null && P2InputTransform != null)
+                {
+                    _p2WebManager = _p2Spider.AddComponent<P2WebManager>();
+                    _p2WebManager.Init(_webController, P2Camera, P2InputTransform, _p2Spider, LoggerInstance);
+                }
+                else
+                {
+                    LoggerInstance.Warning("Cannot init P2WebManager: webController=" + (_webController != null) +
+                        " P2Camera=" + (P2Camera != null) + " P2InputTransform=" + (P2InputTransform != null));
+                }
+            }
+            catch (Exception ex)
+            {
+                LoggerInstance.Warning("P2WebManager setup failed (non-fatal): " + ex);
+            }
+
             LoggerInstance.Msg("Spawned P2: " + _p2Spider.name +
-                               " | P2InputTransform=" + (P2InputTransform != null ? P2InputTransform.name : "null"));
+                               " | P2InputTransform=" + (P2InputTransform != null ? P2InputTransform.name : "null") +
+                               " | P2WebManager=" + (_p2WebManager != null));
         }
 
         private void UpdateP2CameraLook()
@@ -809,75 +849,6 @@ namespace AWJSplitScreen
             if (angle > 180f) angle -= 360f;
             if (angle < -180f) angle += 360f;
             return angle;
-        }
-
-        private void InjectP2Web()
-        {
-            if (_p2Spider == null || _webController == null) return;
-
-            bool shootHeld = P2ShootHeld;
-            bool shootDown = shootHeld && !_p2ShootHeldPrev;
-            bool shootUp = !shootHeld && _p2ShootHeldPrev;
-            _p2ShootHeldPrev = shootHeld;
-
-            bool delDown = InputCompat.IsP2DeletePressedNow(P2UseGamepad, P2GamepadIndex, P2DeleteKeyProp, P2DeleteKeyFallback);
-            bool attachDown = InputCompat.IsP2AttachPressedNow(P2UseGamepad, P2GamepadIndex, P2AttachKeyProp, P2AttachKeyFallback);
-            bool releaseDown = InputCompat.IsP2ReleasePressedNow(P2UseGamepad, P2GamepadIndex, P2ReleaseKeyProp, P2ReleaseKeyFallback);
-
-            try
-            {
-                InP2WebContext = attachDown || delDown || releaseDown;
-
-                if (_wcMobileShootWebBool != null)
-                {
-                    if (shootDown) _wcMobileShootWebBool.Invoke(_webController, new object[] { true });
-                    if (shootUp) _wcMobileShootWebBool.Invoke(_webController, new object[] { false });
-                }
-
-                if (delDown && _wcMobileDeleteWeb != null)
-                    _wcMobileDeleteWeb.Invoke(_webController, null);
-
-                if (attachDown && _wcAttachWeb != null)
-                    _wcAttachWeb.Invoke(_webController, null);
-
-                if (releaseDown && _wcReleaseWebBool != null)
-                    _wcReleaseWebBool.Invoke(_webController, new object[] { true });
-            }
-            catch (Exception ex)
-            {
-                LoggerInstance.Warning("P2 web invoke error (non-fatal): " + ex);
-            }
-            finally
-            {
-                InP2WebContext = false;
-            }
-        }
-
-        private static MethodInfo FindMethod_Bool(Type t, string name)
-        {
-            var ms = t.GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-            for (int i = 0; i < ms.Length; i++)
-            {
-                var m = ms[i];
-                if (m.Name != name) continue;
-                var ps = m.GetParameters();
-                if (ps.Length == 1 && ps[0].ParameterType == typeof(bool))
-                    return m;
-            }
-            return null;
-        }
-
-        private static MethodInfo FindMethod_NoArgs(Type t, string name)
-        {
-            var ms = t.GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-            for (int i = 0; i < ms.Length; i++)
-            {
-                var m = ms[i];
-                if (m.Name != name) continue;
-                var ps = m.GetParameters();
-                if (ps.Length == 0) return m;
-            }
-            return null;
         }
 
         private static GameObject FindPlayerSpider()
@@ -957,6 +928,13 @@ namespace AWJSplitScreen
                 _camRightOrBottom = null;
             }
 
+            // Clean up P2 web system before destroying the spider
+            if (_p2WebManager != null)
+            {
+                _p2WebManager.Cleanup();
+                _p2WebManager = null;
+            }
+
             if (_p2Spider != null)
             {
                 UnityEngine.Object.Destroy(_p2Spider);
@@ -964,7 +942,6 @@ namespace AWJSplitScreen
             }
 
             _webController = null;
-            _p2ShootHeldPrev = false;
 
             _p1InputTransform = null;
             _p2CamRigInited = false;
@@ -978,6 +955,414 @@ namespace AWJSplitScreen
     }
 
     public sealed class P2Marker : MonoBehaviour { }
+
+    /// <summary>
+    /// Manages P2's web actions independently.
+    /// - Shoot/Delete web: invokes P1's WebController with P2 context flags
+    ///   so Harmony patches redirect WebStartPoint/WebDirection/Camera.main.
+    /// - Grapple (attach/release): handled directly via SpringJoint on P2's rigidbody.
+    /// - Target dot: simple unlit sphere primitive (guaranteed visible).
+    /// </summary>
+    public sealed class P2WebManager : MonoBehaviour
+    {
+        private Component _p1WebController;
+        private Type _wcType;
+
+        // Cached methods on P1's WebController (for shoot/delete only)
+        private MethodInfo _mShootWeb;      // MobileShootWeb(bool)
+        private MethodInfo _mDeleteWeb;     // MobileDeleteWeb()
+        private MethodInfo _mCheckForWebTarget; // CheckForWebTarget(float)
+
+        private Camera _p2Camera;
+        private Transform _p2InputTransform;
+        private Rigidbody _p2Rigidbody;
+
+        // Simple sphere target dot
+        private GameObject _p2TargetDot;
+        private static readonly float DotScale = 0.5f;
+
+        // P2 grapple state
+        private SpringJoint _grappleJoint;
+        private LineRenderer _grappleLine;
+        private Vector3 _grapplePoint;
+        private bool _grappleActive;
+        private static readonly float GrappleMaxDist = 50f;
+        private static readonly float GrappleSpring = 500f;
+        private static readonly float GrappleDamper = 15f;
+
+        // Input edge detection
+        private bool _shootHeldPrev;
+        private bool _attachHeldPrev;
+
+        private bool _inited;
+        private MelonLogger.Instance _logger;
+        private float _nextDebugLog;
+        private int _driveCallCount;
+
+        public void Init(Component p1WebController, Camera p2Camera, Transform p2InputTransform, GameObject p2Spider, MelonLogger.Instance logger)
+        {
+            _logger = logger;
+
+            if (p1WebController == null)
+            {
+                logger.Warning("[P2WebManager] P1 WebController is null, cannot initialize.");
+                return;
+            }
+
+            _p1WebController = p1WebController;
+            _wcType = p1WebController.GetType();
+
+            try
+            {
+                _mShootWeb = FindMethod_Bool(_wcType, "MobileShootWeb");
+                _mDeleteWeb = FindMethod_NoArgs(_wcType, "MobileDeleteWeb");
+                _mCheckForWebTarget = FindMethod_Float(_wcType, "CheckForWebTarget");
+
+                _p2Camera = p2Camera;
+                _p2InputTransform = p2InputTransform;
+                _p2Rigidbody = p2Spider.GetComponentInChildren<Rigidbody>();
+
+                CreateTargetDot();
+                CreateGrappleLine(p2Spider);
+
+                _inited = true;
+                logger.Msg("[P2WebManager] Initialized." +
+                    " | ShootWeb=" + (_mShootWeb != null) +
+                    " | DeleteWeb=" + (_mDeleteWeb != null) +
+                    " | CheckForWebTarget=" + (_mCheckForWebTarget != null) +
+                    " | Rigidbody=" + (_p2Rigidbody != null) +
+                    " | TargetDot=" + (_p2TargetDot != null));
+            }
+            catch (Exception ex)
+            {
+                logger.Warning("[P2WebManager] Init failed: " + ex);
+            }
+        }
+
+        private void CreateTargetDot()
+        {
+            _p2TargetDot = GameObject.CreatePrimitive(PrimitiveType.Sphere);
+            _p2TargetDot.name = "P2_WebTargetDot";
+            _p2TargetDot.transform.localScale = Vector3.one * DotScale;
+
+            // Remove collider so it doesn't interfere with raycasts
+            var col = _p2TargetDot.GetComponent<Collider>();
+            if (col != null) UnityEngine.Object.Destroy(col);
+
+            // Bright unlit red material — visible at distance
+            var rend = _p2TargetDot.GetComponent<Renderer>();
+            if (rend != null)
+            {
+                // Try Unlit/Color first (solid color), fallback to Sprites/Default
+                var shader = Shader.Find("Unlit/Color");
+                if (shader == null) shader = Shader.Find("Sprites/Default");
+                if (shader == null) shader = Shader.Find("Standard");
+                if (shader == null) shader = rend.material.shader;
+                var mat = new Material(shader);
+                mat.color = new Color(1f, 0f, 0f, 1f);
+                // Try to set _Color property directly for Standard shader
+                try { mat.SetColor("_Color", new Color(1f, 0f, 0f, 1f)); } catch { }
+                try { mat.SetColor("_EmissionColor", new Color(1f, 0f, 0f, 1f)); } catch { }
+                rend.material = mat;
+                rend.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+                rend.receiveShadows = false;
+            }
+
+            _p2TargetDot.SetActive(false);
+            _logger.Msg("[P2WebManager] Created target dot sphere.");
+        }
+
+        private void CreateGrappleLine(GameObject p2Spider)
+        {
+            var lineGo = new GameObject("P2_GrappleLine");
+            lineGo.transform.SetParent(p2Spider.transform, false);
+            _grappleLine = lineGo.AddComponent<LineRenderer>();
+            _grappleLine.positionCount = 2;
+            _grappleLine.startWidth = 0.08f;
+            _grappleLine.endWidth = 0.08f;
+
+            var lineMat = new Material(Shader.Find("Sprites/Default") ?? Shader.Find("Unlit/Color") ?? Shader.Find("Standard"));
+            lineMat.color = new Color(0.9f, 0.9f, 1f, 0.8f);
+            _grappleLine.material = lineMat;
+            _grappleLine.enabled = false;
+        }
+
+        public void DriveInput()
+        {
+            _driveCallCount++;
+
+            if (!_inited || _p1WebController == null)
+            {
+                if (Time.unscaledTime >= _nextDebugLog)
+                {
+                    _nextDebugLog = Time.unscaledTime + 3f;
+                    if (_logger != null)
+                        _logger.Warning("[P2WebManager] DriveInput SKIPPED: inited=" + _inited + " wc=" + (_p1WebController != null));
+                }
+                return;
+            }
+
+            try
+            {
+                // --- Read P2 input ---
+                bool shootHeld = InputCompat.IsP2ShootHeldNow(
+                    SplitScreenMod.P2UseGamepad,
+                    SplitScreenMod.P2GamepadIndex,
+                    SplitScreenMod.P2TriggerThreshold,
+                    "uKey", KeyCode.U);
+                bool shootDown = shootHeld && !_shootHeldPrev;
+                bool shootUp   = !shootHeld && _shootHeldPrev;
+                _shootHeldPrev = shootHeld;
+
+                // LT uses hysteresis: higher threshold to start, lower to release
+                // This prevents rapid on/off flickering when LT hovers near threshold
+                float attachThresh = _attachHeldPrev ? (SplitScreenMod.P2TriggerThreshold * 0.5f) : SplitScreenMod.P2TriggerThreshold;
+                bool attachHeld = InputCompat.IsP2AttachHeldNow(
+                    SplitScreenMod.P2UseGamepad,
+                    SplitScreenMod.P2GamepadIndex,
+                    attachThresh,
+                    "pKey", KeyCode.P);
+                bool attachDown = attachHeld && !_attachHeldPrev;
+                bool attachUp  = !attachHeld && _attachHeldPrev;
+                _attachHeldPrev = attachHeld;
+
+                bool delDown = InputCompat.IsP2DeletePressedNow(
+                    SplitScreenMod.P2UseGamepad,
+                    SplitScreenMod.P2GamepadIndex,
+                    "oKey", KeyCode.O);
+
+                bool releaseDown = InputCompat.IsP2ReleasePressedNow(
+                    SplitScreenMod.P2UseGamepad,
+                    SplitScreenMod.P2GamepadIndex,
+                    "rightCtrlKey", KeyCode.RightControl);
+
+                // --- Periodic debug dump ---
+                if (Time.unscaledTime >= _nextDebugLog)
+                {
+                    _nextDebugLog = Time.unscaledTime + 2f;
+                    if (_logger != null)
+                        _logger.Msg("[P2WebManager] TICK #" + _driveCallCount +
+                            " | shootHeld=" + shootHeld + " attachHeld=" + attachHeld +
+                            " | cam=" + (_p2Camera != null) + " rb=" + (_p2Rigidbody != null) +
+                            " | dot=" + (_p2TargetDot != null ? _p2TargetDot.activeSelf.ToString() : "NULL") +
+                            " | grapple=" + _grappleActive + " joint=" + (_grappleJoint != null) +
+                            " | line=" + (_grappleLine != null ? _grappleLine.enabled.ToString() : "NULL"));
+                }
+
+                // --- Target dot (always visible, like P1's) ---
+                UpdateTargetDot(true);
+
+                // --- Shoot/Delete web via P1's WebController with P2 context ---
+                if (shootDown || shootUp || delDown)
+                {
+                    if (_logger != null)
+                        _logger.Msg("[P2WebManager] WEB ACTION: shootDown=" + shootDown + " shootUp=" + shootUp + " delDown=" + delDown);
+
+                    SplitScreenMod.InP2WebContext = true;
+                    SplitScreenMod.P2ShootHeld = true;
+                    try
+                    {
+                        if (shootHeld && _mCheckForWebTarget != null)
+                            _mCheckForWebTarget.Invoke(_p1WebController, new object[] { 1f });
+
+                        if (shootDown && _mShootWeb != null)
+                            _mShootWeb.Invoke(_p1WebController, new object[] { true });
+                        if (shootUp && _mShootWeb != null)
+                            _mShootWeb.Invoke(_p1WebController, new object[] { false });
+
+                        if (delDown && _mDeleteWeb != null)
+                            _mDeleteWeb.Invoke(_p1WebController, null);
+                    }
+                    finally
+                    {
+                        SplitScreenMod.InP2WebContext = false;
+                        SplitScreenMod.P2ShootHeld = false;
+                    }
+                }
+
+                // --- Grapple (attach/release) handled directly on P2's rigidbody ---
+                if (attachDown)
+                {
+                    if (_logger != null)
+                        _logger.Msg("[P2WebManager] GRAPPLE ATTACH triggered");
+                    TryStartGrapple();
+                }
+
+                if (attachUp || releaseDown)
+                {
+                    if (_logger != null)
+                        _logger.Msg("[P2WebManager] GRAPPLE RELEASE: attachUp=" + attachUp + " releaseDown=" + releaseDown);
+                    StopGrapple();
+                }
+
+                // Update grapple line visual
+                UpdateGrappleLine();
+            }
+            catch (Exception ex)
+            {
+                SplitScreenMod.InP2WebContext = false;
+                SplitScreenMod.P2ShootHeld = false;
+                if (_logger != null)
+                    _logger.Warning("[P2WebManager] DriveInput error: " + ex);
+            }
+        }
+
+        private void UpdateTargetDot(bool show)
+        {
+            if (_p2TargetDot == null || _p2Camera == null) return;
+
+            // Always raycast from P2's camera and show the dot where P2 is looking
+            Ray ray = new Ray(_p2Camera.transform.position, _p2Camera.transform.forward);
+            RaycastHit hit;
+
+            if (Physics.Raycast(ray, out hit, GrappleMaxDist))
+            {
+                _p2TargetDot.SetActive(true);
+                _p2TargetDot.transform.position = hit.point + hit.normal * 0.05f;
+            }
+            else
+            {
+                // Nothing in range — hide dot
+                _p2TargetDot.SetActive(false);
+            }
+        }
+
+        private void TryStartGrapple()
+        {
+            if (_p2Rigidbody == null || _p2Camera == null)
+            {
+                if (_logger != null)
+                    _logger.Warning("[P2WebManager] TryStartGrapple FAILED: rb=" + (_p2Rigidbody != null) + " cam=" + (_p2Camera != null));
+                return;
+            }
+
+            Ray ray = new Ray(_p2Camera.transform.position, _p2Camera.transform.forward);
+            RaycastHit hit;
+
+            if (!Physics.Raycast(ray, out hit, GrappleMaxDist))
+            {
+                if (_logger != null)
+                    _logger.Msg("[P2WebManager] TryStartGrapple: no raycast hit from " + ray.origin + " dir " + ray.direction);
+                return;
+            }
+
+            _grapplePoint = hit.point;
+            _grappleActive = true;
+
+            // Remove existing joint if any
+            if (_grappleJoint != null)
+                UnityEngine.Object.Destroy(_grappleJoint);
+
+            _grappleJoint = _p2Rigidbody.gameObject.AddComponent<SpringJoint>();
+            _grappleJoint.autoConfigureConnectedAnchor = false;
+            _grappleJoint.connectedAnchor = _grapplePoint;
+            _grappleJoint.anchor = Vector3.zero;
+
+            float dist = Vector3.Distance(_p2Rigidbody.position, _grapplePoint);
+            _grappleJoint.maxDistance = dist * 0.8f;
+            _grappleJoint.minDistance = 0f;
+            _grappleJoint.spring = GrappleSpring;
+            _grappleJoint.damper = GrappleDamper;
+            _grappleJoint.breakForce = Mathf.Infinity;
+            _grappleJoint.tolerance = 0.01f;
+
+            if (_logger != null)
+                _logger.Msg("[P2WebManager] Grapple CREATED: point=" + _grapplePoint +
+                    " dist=" + dist.ToString("F1") +
+                    " rbPos=" + _p2Rigidbody.position +
+                    " rbGO=" + _p2Rigidbody.gameObject.name +
+                    " joint=" + (_grappleJoint != null));
+        }
+
+        private void StopGrapple()
+        {
+            if (_grappleJoint != null)
+            {
+                UnityEngine.Object.Destroy(_grappleJoint);
+                _grappleJoint = null;
+            }
+            _grappleActive = false;
+
+            if (_grappleLine != null)
+                _grappleLine.enabled = false;
+        }
+
+        private void UpdateGrappleLine()
+        {
+            if (_grappleLine == null) return;
+
+            if (!_grappleActive || _grappleJoint == null || _p2Rigidbody == null)
+            {
+                _grappleLine.enabled = false;
+                return;
+            }
+
+            _grappleLine.enabled = true;
+            _grappleLine.SetPosition(0, _p2Rigidbody.position);
+            _grappleLine.SetPosition(1, _grapplePoint);
+        }
+
+        public void Cleanup()
+        {
+            StopGrapple();
+
+            if (_p2TargetDot != null)
+            {
+                UnityEngine.Object.Destroy(_p2TargetDot);
+                _p2TargetDot = null;
+            }
+            if (_grappleLine != null)
+            {
+                UnityEngine.Object.Destroy(_grappleLine.gameObject);
+                _grappleLine = null;
+            }
+            _p1WebController = null;
+            _p2Camera = null;
+            _p2InputTransform = null;
+            _p2Rigidbody = null;
+            _inited = false;
+        }
+
+        private void OnDestroy()
+        {
+            Cleanup();
+        }
+
+        private static MethodInfo FindMethod_Bool(Type t, string name)
+        {
+            var ms = t.GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            for (int i = 0; i < ms.Length; i++)
+            {
+                if (ms[i].Name != name) continue;
+                var ps = ms[i].GetParameters();
+                if (ps.Length == 1 && ps[0].ParameterType == typeof(bool)) return ms[i];
+            }
+            return null;
+        }
+
+        private static MethodInfo FindMethod_NoArgs(Type t, string name)
+        {
+            var ms = t.GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            for (int i = 0; i < ms.Length; i++)
+            {
+                if (ms[i].Name != name) continue;
+                if (ms[i].GetParameters().Length == 0) return ms[i];
+            }
+            return null;
+        }
+
+        private static MethodInfo FindMethod_Float(Type t, string name)
+        {
+            var ms = t.GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            for (int i = 0; i < ms.Length; i++)
+            {
+                if (ms[i].Name != name) continue;
+                var ps = ms[i].GetParameters();
+                if (ps.Length == 1 && ps[0].ParameterType == typeof(float)) return ms[i];
+            }
+            return null;
+        }
+    }
 
     /// <summary>
     /// Faithful replacement for LegController on P2.
@@ -1744,16 +2129,7 @@ namespace AWJSplitScreen
             return SplitScreenMod.P2ShootHeld || SplitScreenMod.InP2WebContext;
         }
 
-        public static void WebControllerUpdate_Prefix()
-        {
-            SplitScreenMod.P2ShootHeld = InputCompat.IsP2ShootHeldNow(
-                SplitScreenMod.P2UseGamepad,
-                SplitScreenMod.P2GamepadIndex,
-                SplitScreenMod.P2TriggerThreshold,
-                "uKey",
-                KeyCode.U
-            );
-        }
+        private static float _nextFilterLog;
 
         public static bool CallbackContextFilter_Prefix(object __instance, object __0)
         {
@@ -1761,7 +2137,14 @@ namespace AWJSplitScreen
             if (!SplitScreenMod.P2UseGamepad) return true;
 
             if (InputCompat.IsCallbackContextFromP2Gamepad(__0, SplitScreenMod.P2GamepadIndex))
+            {
+                if (Time.unscaledTime >= _nextFilterLog)
+                {
+                    _nextFilterLog = Time.unscaledTime + 2f;
+                    MelonLogger.Msg("[WebControllerPatches] BLOCKED P2 callback on " + __instance.GetType().Name);
+                }
                 return false;
+            }
 
             return true;
         }
@@ -1798,6 +2181,15 @@ namespace AWJSplitScreen
                 return false;
             }
 
+            return true;
+        }
+
+        public static bool CheckForWebTarget_Prefix(object __instance, float raycastRadiusFactor)
+        {
+            if (!ShouldUseP2Now()) return true;
+            // When in P2 context, still run the original method — the WebDirection and
+            // Camera.main patches will redirect the raycast origin/direction to P2's camera.
+            // We just need to let it run with P2's redirected data.
             return true;
         }
     }
@@ -1911,6 +2303,9 @@ namespace AWJSplitScreen
         private static PropertyInfo _buttonNorthProp;
         private static PropertyInfo _buttonEastProp;
         private static PropertyInfo _rightShoulderProp;
+        private static PropertyInfo _leftTriggerProp;
+        private static PropertyInfo _leftShoulderProp;
+        private static PropertyInfo _buttonWestProp;
 
         private static MethodInfo _controlReadValueVec2;
         private static MethodInfo _controlReadValueFloat;
@@ -1959,6 +2354,9 @@ namespace AWJSplitScreen
                 _buttonNorthProp = _gamepadType.GetProperty("buttonNorth", BindingFlags.Public | BindingFlags.Instance);
                 _buttonEastProp = _gamepadType.GetProperty("buttonEast", BindingFlags.Public | BindingFlags.Instance);
                 _rightShoulderProp = _gamepadType.GetProperty("rightShoulder", BindingFlags.Public | BindingFlags.Instance);
+                _leftTriggerProp = _gamepadType.GetProperty("leftTrigger", BindingFlags.Public | BindingFlags.Instance);
+                _leftShoulderProp = _gamepadType.GetProperty("leftShoulder", BindingFlags.Public | BindingFlags.Instance);
+                _buttonWestProp = _gamepadType.GetProperty("buttonWest", BindingFlags.Public | BindingFlags.Instance);
 
                 var vec2Control = Type.GetType("UnityEngine.InputSystem.Controls.Vector2Control, Unity.InputSystem");
                 if (vec2Control != null) _controlReadValueVec2 = vec2Control.GetMethod("ReadValue", BindingFlags.Public | BindingFlags.Instance, null, Type.EmptyTypes, null);
@@ -2201,8 +2599,18 @@ namespace AWJSplitScreen
             bool kb = Down("backslashKey", KeyCode.Backslash);
             if (!useGamepad) return kb;
             var gp = GetGamepadAtIndex(index);
-            bool north = ReadButtonDown(gp, _buttonNorthProp);
-            return kb || north;
+            bool south = ReadButtonDown(gp, _buttonSouthProp);
+            return kb || south;
+        }
+
+        public static bool IsP2AttachHeldNow(bool useGamepad, int index, float triggerThreshold, string kbProp, KeyCode kbFallback)
+        {
+            bool kb = Held(kbProp, kbFallback);
+            if (!useGamepad) return kb;
+
+            var gp = GetGamepadAtIndex(index);
+            float lt = ReadAxis(gp, _leftTriggerProp);
+            return kb || (lt >= triggerThreshold);
         }
 
         public static bool IsP2AttachPressedNow(bool useGamepad, int index, string kbProp, KeyCode kbFallback)
@@ -2211,8 +2619,9 @@ namespace AWJSplitScreen
             if (!useGamepad) return kb;
 
             var gp = GetGamepadAtIndex(index);
-            bool a = ReadButtonDown(gp, _buttonSouthProp);
-            return kb || a;
+            float lt = ReadAxis(gp, _leftTriggerProp);
+            // Treat trigger as "pressed" when it crosses threshold — callers track edge themselves
+            return kb || (lt >= 0.35f);
         }
 
         public static bool IsP2DeletePressedNow(bool useGamepad, int index, string kbProp, KeyCode kbFallback)

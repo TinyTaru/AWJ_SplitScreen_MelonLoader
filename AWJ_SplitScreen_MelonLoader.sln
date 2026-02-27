@@ -1,0 +1,24 @@
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.5.2.0
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "AWJ_SplitScreen", "AWJ_SplitScreen.csproj", "{8741AA05-275C-3C5A-5A6A-2C8CF42BDCEB}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{8741AA05-275C-3C5A-5A6A-2C8CF42BDCEB}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{8741AA05-275C-3C5A-5A6A-2C8CF42BDCEB}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{8741AA05-275C-3C5A-5A6A-2C8CF42BDCEB}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{8741AA05-275C-3C5A-5A6A-2C8CF42BDCEB}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {01B1D65E-90BA-49F5-94B5-6C84157AFE12}
+	EndGlobalSection
+EndGlobal
