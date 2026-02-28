@@ -979,16 +979,21 @@ namespace AWJSplitScreen
 
         // Simple sphere target dot
         private GameObject _p2TargetDot;
-        private static readonly float DotScale = 0.5f;
+        private float _p2DotScale = 0.5f;
+        private float _p2NormalOffset = 0.05f;
 
         // P2 grapple state
         private SpringJoint _grappleJoint;
         private LineRenderer _grappleLine;
         private Vector3 _grapplePoint;
         private bool _grappleActive;
-        private static readonly float GrappleMaxDist = 50f;
+        private float _grappleMaxDist = 50f;
         private static readonly float GrappleSpring = 500f;
         private static readonly float GrappleDamper = 15f;
+
+        // P1-derived parameters (read via reflection/logging)
+        private float _p1MaxDistance = 50f;
+        private float _p1TargetScale = 0.5f;
 
         // Input edge detection
         private bool _shootHeldPrev;
@@ -1002,40 +1007,49 @@ namespace AWJSplitScreen
         public void Init(Component p1WebController, Camera p2Camera, Transform p2InputTransform, GameObject p2Spider, MelonLogger.Instance logger)
         {
             _logger = logger;
-
-            if (p1WebController == null)
-            {
-                logger.Warning("[P2WebManager] P1 WebController is null, cannot initialize.");
-                return;
-            }
-
-            _p1WebController = p1WebController;
-            _wcType = p1WebController.GetType();
+            if (_logger != null) _logger.Msg("[P2WebManager] Init begin");
 
             try
             {
-                _mShootWeb = FindMethod_Bool(_wcType, "MobileShootWeb");
-                _mDeleteWeb = FindMethod_NoArgs(_wcType, "MobileDeleteWeb");
-                _mCheckForWebTarget = FindMethod_Float(_wcType, "CheckForWebTarget");
+                if (p1WebController == null)
+                {
+                    logger.Warning("[P2WebManager] P1 WebController is null, cannot initialize.");
+                    return;
+                }
+
+                _p1WebController = p1WebController;
+                _wcType = p1WebController.GetType();
+
+                // Cache methods (non-fatal)
+                try { CacheWebControllerMethods(); } catch (Exception ex) { logger.Warning("[P2WebManager] CacheWebControllerMethods failed during init: " + ex); }
+
+                // Read P1 params (non-fatal, skip if dependencies missing)
+                try { TryReadP1TargetParams(p1WebController); } catch (System.IO.FileNotFoundException fnf) { logger.Warning("[P2WebManager] Skip TryReadP1TargetParams (missing dependency): " + fnf.Message); } catch (Exception ex) { logger.Warning("[P2WebManager] TryReadP1TargetParams failed during init: " + ex); }
 
                 _p2Camera = p2Camera;
                 _p2InputTransform = p2InputTransform;
-                _p2Rigidbody = p2Spider.GetComponentInChildren<Rigidbody>();
+                _p2Rigidbody = p2Spider != null ? p2Spider.GetComponent<Rigidbody>() : null;
 
-                CreateTargetDot();
-                CreateGrappleLine(p2Spider);
+                // Use P1-derived scale/offset if found
+                _p2DotScale = _p1TargetScale > 0.01f ? _p1TargetScale : _p2DotScale;
+                _grappleMaxDist = _p1MaxDistance > 0f ? _p1MaxDistance : _grappleMaxDist;
 
-                _inited = true;
+                try { CreateTargetDot(); } catch (Exception ex) { logger.Warning("[P2WebManager] CreateTargetDot failed: " + ex); }
+                try { CreateGrappleLine(p2Spider); } catch (Exception ex) { logger.Warning("[P2WebManager] CreateGrappleLine failed: " + ex); }
+
                 logger.Msg("[P2WebManager] Initialized." +
                     " | ShootWeb=" + (_mShootWeb != null) +
                     " | DeleteWeb=" + (_mDeleteWeb != null) +
                     " | CheckForWebTarget=" + (_mCheckForWebTarget != null) +
                     " | Rigidbody=" + (_p2Rigidbody != null) +
-                    " | TargetDot=" + (_p2TargetDot != null));
+                    " | TargetDot=" + (_p2TargetDot != null) +
+                    " | P1MaxDist=" + _p1MaxDistance + " | P1Scale=" + _p1TargetScale + " | P2Offset=" + _p2NormalOffset);
             }
-            catch (Exception ex)
+            finally
             {
-                logger.Warning("[P2WebManager] Init failed: " + ex);
+                // Even if parts failed, mark inited when core references exist so DriveInput can run
+                if (_p2Camera != null && _p2Rigidbody != null)
+                    _inited = true;
             }
         }
 
@@ -1043,7 +1057,7 @@ namespace AWJSplitScreen
         {
             _p2TargetDot = GameObject.CreatePrimitive(PrimitiveType.Sphere);
             _p2TargetDot.name = "P2_WebTargetDot";
-            _p2TargetDot.transform.localScale = Vector3.one * DotScale;
+            _p2TargetDot.transform.localScale = Vector3.one * _p2DotScale;
 
             // Remove collider so it doesn't interfere with raycasts
             var col = _p2TargetDot.GetComponent<Collider>();
@@ -1063,6 +1077,17 @@ namespace AWJSplitScreen
                 // Try to set _Color property directly for Standard shader
                 try { mat.SetColor("_Color", new Color(1f, 0f, 0f, 1f)); } catch { }
                 try { mat.SetColor("_EmissionColor", new Color(1f, 0f, 0f, 1f)); } catch { }
+<<<<<<< Updated upstream
+=======
+
+                // Force ZTest=Always and ZWrite Off so the dot draws over any occluding geometry
+                // (including P2's own body which sits between the camera and the target).
+                try { mat.SetInt("_ZTest", (int)UnityEngine.Rendering.CompareFunction.Always); } catch { }
+                try { mat.SetInt("_ZWrite", 0); } catch { }
+                // Render in a very late queue so it draws last, on top of everything
+                mat.renderQueue = 5000;
+
+>>>>>>> Stashed changes
                 rend.material = mat;
                 rend.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
                 rend.receiveShadows = false;
@@ -1085,6 +1110,164 @@ namespace AWJSplitScreen
             lineMat.color = new Color(0.9f, 0.9f, 1f, 0.8f);
             _grappleLine.material = lineMat;
             _grappleLine.enabled = false;
+        }
+
+        private void TryReadP1TargetParams(Component wc)
+        {
+            if (wc == null) return;
+            try
+            {
+                var t = wc.GetType();
+                float maxDist = -1f;
+                float scale = -1f;
+                float normalOffset = -1f;
+                string maxDistField = null;
+                string scaleField = null;
+                string offsetField = null;
+
+                // Scan fields for plausible values
+                var fields = t.GetFields(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                for (int i = 0; i < fields.Length; i++)
+                {
+                    var f = fields[i];
+                    try
+                    {
+                        if (f.FieldType == typeof(float))
+                        {
+                            float v = (float)f.GetValue(wc);
+                            string name = f.Name.ToLowerInvariant();
+
+                            if (v > 0f && v < 1000f && (name.Contains("distance") || name.Contains("dist")))
+                            {
+                                maxDist = v;
+                                maxDistField = f.Name;
+                            }
+
+                            if (v > 0f && v < 10f && (name.Contains("scale") || name.Contains("radius")))
+                            {
+                                scale = v;
+                                scaleField = f.Name;
+                            }
+
+                            if (v > 0f && v < 1f && (name.Contains("offset") || name.Contains("normal")))
+                            {
+                                normalOffset = v;
+                                offsetField = f.Name;
+                            }
+                        }
+                        else if (typeof(GameObject).IsAssignableFrom(f.FieldType))
+                        {
+                            var go = f.GetValue(wc) as GameObject;
+                            if (go != null && f.Name.ToLowerInvariant().Contains("target"))
+                            {
+                                var los = go.transform.localScale;
+                                float s = (los.x + los.y + los.z) / 3f;
+                                if (s > 0f && s < 10f)
+                                {
+                                    scale = s;
+                                    scaleField = f.Name + ".transform.localScale";
+                                }
+                            }
+                        }
+                    }
+                    catch { }
+                }
+
+                // Scan properties for max distance
+                var props = t.GetProperties(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                for (int i = 0; i < props.Length; i++)
+                {
+                    var p = props[i];
+                    if (!p.CanRead) continue;
+                    try
+                    {
+                        if (p.PropertyType == typeof(float))
+                        {
+                            float v = (float)p.GetValue(wc, null);
+                            string name = p.Name.ToLowerInvariant();
+                            if (v > 0f && v < 1000f && (name.Contains("distance") || name.Contains("dist")))
+                            {
+                                maxDist = v;
+                                maxDistField = p.Name + "(prop)";
+                            }
+                            if (v > 0f && v < 10f && (name.Contains("scale") || name.Contains("radius")))
+                            {
+                                scale = v;
+                                scaleField = p.Name + "(prop)";
+                            }
+                        }
+                    }
+                    catch { }
+                }
+
+                if (maxDist > 0f) _p1MaxDistance = maxDist;
+                if (scale > 0f) _p1TargetScale = scale;
+                if (normalOffset > 0f) _p2NormalOffset = normalOffset;
+
+                // Try to read WebStartPoint/WebDirection to infer ray origin/direction
+                Vector3 origin = Vector3.zero;
+                Vector3 direction = Vector3.zero;
+                string originSource = null;
+                string dirSource = null;
+
+                try
+                {
+                    var mStart = t.GetMethod("get_WebStartPoint", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                    if (mStart != null)
+                    {
+                        var val = mStart.Invoke(wc, null);
+                        if (val is Vector3 v)
+                        {
+                            origin = v;
+                            originSource = "WebStartPoint(Vector3)";
+                        }
+                        else if (val is Transform tr && tr != null)
+                        {
+                            origin = tr.position;
+                            originSource = "WebStartPoint(Transform.position)";
+                        }
+                    }
+
+                    var mDir = t.GetMethod("get_WebDirection", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                    if (mDir != null)
+                    {
+                        var val = mDir.Invoke(wc, null);
+                        if (val is Vector3 v2)
+                        {
+                            direction = v2;
+                            dirSource = "WebDirection(Vector3)";
+                        }
+                    }
+                }
+                catch { }
+
+                if (_logger != null)
+                    _logger.Msg($"[P2WebManager] P1 target params: maxDist={_p1MaxDistance}({maxDistField}) scale={_p1TargetScale}({scaleField}) normalOffset={_p2NormalOffset}({offsetField}) origin={origin}({originSource}) dir={direction}({dirSource})");
+            }
+            catch (Exception ex)
+            {
+                if (_logger != null)
+                    _logger.Warning("[P2WebManager] TryReadP1TargetParams failed: " + ex);
+            }
+        }
+
+        private void CacheWebControllerMethods()
+        {
+            try
+            {
+                if (_wcType == null) return;
+                _mShootWeb = _wcType.GetMethod("MobileShootWeb", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic, null, new Type[] { typeof(bool) }, null);
+                _mDeleteWeb = _wcType.GetMethod("MobileDeleteWeb", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic, null, Type.EmptyTypes, null);
+                _mCheckForWebTarget = _wcType.GetMethod("CheckForWebTarget", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic, null, new Type[] { typeof(float) }, null);
+
+                if (_logger != null)
+                    _logger.Msg("[P2WebManager] CacheWebControllerMethods: shoot=" + (_mShootWeb != null) + " delete=" + (_mDeleteWeb != null) + " check=" + (_mCheckForWebTarget != null));
+            }
+            catch (Exception ex)
+            {
+                if (_logger != null)
+                    _logger.Warning("[P2WebManager] CacheWebControllerMethods failed: " + ex);
+            }
         }
 
         public void DriveInput()
@@ -1212,13 +1395,13 @@ namespace AWJSplitScreen
             if (_p2TargetDot == null || _p2Camera == null) return;
 
             // Always raycast from P2's camera and show the dot where P2 is looking
-            Ray ray = new Ray(_p2Camera.transform.position, _p2Camera.transform.forward);
+            var ray = BuildP2Ray();
             RaycastHit hit;
 
-            if (Physics.Raycast(ray, out hit, GrappleMaxDist))
+            if (Physics.Raycast(ray, out hit, _grappleMaxDist))
             {
                 _p2TargetDot.SetActive(true);
-                _p2TargetDot.transform.position = hit.point + hit.normal * 0.05f;
+                _p2TargetDot.transform.position = hit.point + hit.normal * _p2NormalOffset;
             }
             else
             {
@@ -1236,10 +1419,10 @@ namespace AWJSplitScreen
                 return;
             }
 
-            Ray ray = new Ray(_p2Camera.transform.position, _p2Camera.transform.forward);
+            var ray = BuildP2Ray();
             RaycastHit hit;
 
-            if (!Physics.Raycast(ray, out hit, GrappleMaxDist))
+            if (!Physics.Raycast(ray, out hit, _grappleMaxDist))
             {
                 if (_logger != null)
                     _logger.Msg("[P2WebManager] TryStartGrapple: no raycast hit from " + ray.origin + " dir " + ray.direction);
@@ -1285,6 +1468,18 @@ namespace AWJSplitScreen
 
             if (_grappleLine != null)
                 _grappleLine.enabled = false;
+        }
+
+        private Ray BuildP2Ray()
+        {
+            // Start slightly in front of the camera to avoid P2's own body occluding the dot
+            float offset = 0.5f;
+            if (_p2Camera != null)
+                offset = Mathf.Max(0.2f, _p2Camera.nearClipPlane + 0.1f);
+
+            var origin = _p2Camera.transform.position + _p2Camera.transform.forward * offset;
+            var dir = _p2Camera.transform.forward;
+            return new Ray(origin, dir);
         }
 
         private void UpdateGrappleLine()
