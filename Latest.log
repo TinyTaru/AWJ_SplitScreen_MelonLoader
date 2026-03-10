@@ -1,0 +1,295 @@
+
+[21:45:53.114] ------------------------------
+[21:45:53.139] MelonLoader v0.7.1 Open-Beta
+[21:45:53.140] OS: Windows 11
+[21:45:53.140] Hash Code: 92E7D4D50B8F627A23C38EDB9DA9426B6DF6561D86F10DE03DC5831D8AC76AF0
+[21:45:53.140] ------------------------------
+[21:45:53.152] Game Type: MonoBleedingEdge
+[21:45:53.152] Game Arch: x64
+[21:45:53.152] ------------------------------
+[21:45:53.152] Command-Line: 
+[21:45:53.152] ------------------------------
+[21:45:53.153] Core::BasePath = C:\Program Files (x86)\Steam\steamapps\common\A Webbing Journey
+[21:45:53.153] Game::BasePath = C:\Program Files (x86)\Steam\steamapps\common\A Webbing Journey
+[21:45:53.153] Game::DataPath = C:\Program Files (x86)\Steam\steamapps\common\A Webbing Journey\A Webbing Journey_Data
+[21:45:53.153] Game::ApplicationPath = C:\Program Files (x86)\Steam\steamapps\common\A Webbing Journey\A Webbing Journey.exe
+[21:45:53.153] Runtime Type: net35
+[21:45:53.252] ------------------------------
+[21:45:53.253] Game Name: A Webbing Journey
+[21:45:53.253] Game Developer: Fire Totem Games
+[21:45:53.254] Unity Version: 6000.2.6f2
+[21:45:53.254] Game Version: UNKNOWN
+[21:45:53.254] ------------------------------
+
+[21:45:53.418] Preferences Loaded!
+
+[21:45:53.443] Loading UserLibs...
+[21:45:53.458] ------------------------------
+[21:45:53.491] Melon Assembly loaded: '.\UserLibs\UniverseLib.Mono.dll'
+[21:45:53.491] SHA256 Hash: '3B10913FFEAC9A0744583F0BB18218A5CFAFCBA467A7F9F99FA731E801A5A880'
+[21:45:53.492] ------------------------------
+[21:45:53.492] 0 UserLibs loaded.
+
+[21:45:53.492] Loading Plugins...
+[21:45:53.494] 0 Plugins loaded.
+
+[21:45:53.720] Hooked into static void UnityEngine.SceneManagement.SceneManager::Internal_ActiveSceneChanged(UnityEngine.SceneManagement.Scene previousActiveScene, UnityEngine.SceneManagement.Scene newActiveScene)
+
+[21:45:54.126] Loading Mods...
+[21:45:54.361] ------------------------------
+[21:45:54.362] Melon Assembly loaded: '.\Mods\AWJ_SplitScreen.dll'
+[21:45:54.363] SHA256 Hash: 'A6D16393C7F156EC127DC63A8952DBB9FCBD3A32C6BFD12E7C9587659D2DB504'
+[21:45:54.384] Melon Assembly loaded: '.\Mods\UnityExplorer.ML.Mono.dll'
+[21:45:54.384] SHA256 Hash: '7E6C95C5F0DB2D6B22F506AAD4D268A96250BD64D8E259B7E4073106250F36D2'
+
+[21:45:54.412] Some Melons are missing dependencies, which you may have to install.
+If these are optional dependencies, mark them as optional using the MelonOptionalDependencies attribute.
+This warning will turn into an error and Melons with missing dependencies will not be loaded in future versions of MelonLoader.
+- 'AWJ Split Screen + P2 Inject' is missing the following dependencies:
+    - 'MonoMod.Backports' v1.1.0.0
+[21:45:54.418] ------------------------------
+[21:45:54.418] AWJ Split Screen + P2 Inject v0.2.2
+[21:45:54.418] by ChatGPT
+[21:45:54.419] Assembly: AWJ_SplitScreen.dll
+[21:45:54.419] ------------------------------
+[21:45:54.419] ------------------------------
+[21:45:54.420] UnityExplorer v4.9.0
+[21:45:54.420] by Sinai
+[21:45:54.420] Assembly: UnityExplorer.ML.Mono.dll
+[21:45:54.420] ------------------------------
+[21:45:54.420] ------------------------------
+[21:45:54.420] 2 Mods loaded.
+
+[21:45:54.426] Support Module Loaded: C:\Program Files (x86)\Steam\steamapps\common\A Webbing Journey\MelonLoader\Dependencies\SupportModules\Mono.dll
+[21:45:54.631] [AWJ_Split_Screen_+_P2_Inject] Patched BodyMovement: FixedUpdate + NpcWalk + CallbackContext filter.
+[21:45:54.631] [AWJ_Split_Screen_+_P2_Inject] BodyMovement moveVector field: moveVector
+[21:45:54.677] [AWJ_Split_Screen_+_P2_Inject] Patched LegController: FixedUpdate (P2 parent-guard suppression).
+[21:45:54.727] [AWJ_Split_Screen_+_P2_Inject] [WebController] Properties (24):
+[21:45:54.727] [AWJ_Split_Screen_+_P2_Inject]   prop: WebTargetActive -> Boolean
+[21:45:54.728] [AWJ_Split_Screen_+_P2_Inject]   prop: WebTarget -> Transform
+[21:45:54.728] [AWJ_Split_Screen_+_P2_Inject]   prop: WebTargetObject -> GameObject
+[21:45:54.728] [AWJ_Split_Screen_+_P2_Inject]   prop: CanShootWebs -> Boolean
+[21:45:54.728] [AWJ_Split_Screen_+_P2_Inject]   prop: WebActive -> Boolean
+[21:45:54.728] [AWJ_Split_Screen_+_P2_Inject]   prop: MovingAnchorActive -> Boolean
+[21:45:54.728] [AWJ_Split_Screen_+_P2_Inject]   prop: FixedAnchorActive -> Boolean
+[21:45:54.728] [AWJ_Split_Screen_+_P2_Inject]   prop: WebAnchorActive -> Boolean
+[21:45:54.728] [AWJ_Split_Screen_+_P2_Inject]   prop: WebDirection -> Vector3
+[21:45:54.728] [AWJ_Split_Screen_+_P2_Inject]   prop: WebDistance -> Single
+[21:45:54.728] [AWJ_Split_Screen_+_P2_Inject]   prop: WebStartPoint -> Transform
+[21:45:54.728] [AWJ_Split_Screen_+_P2_Inject]   prop: WebColliderRadius -> Single
+[21:45:54.729] [AWJ_Split_Screen_+_P2_Inject]   prop: WebAnchorObject -> GameObject
+[21:45:54.729] [AWJ_Split_Screen_+_P2_Inject]   prop: destroyCancellationToken -> CancellationToken
+[21:45:54.729] [AWJ_Split_Screen_+_P2_Inject]   prop: useGUILayout -> Boolean
+[21:45:54.729] [AWJ_Split_Screen_+_P2_Inject]   prop: didStart -> Boolean
+[21:45:54.729] [AWJ_Split_Screen_+_P2_Inject]   prop: didAwake -> Boolean
+[21:45:54.729] [AWJ_Split_Screen_+_P2_Inject]   prop: enabled -> Boolean
+[21:45:54.729] [AWJ_Split_Screen_+_P2_Inject]   prop: isActiveAndEnabled -> Boolean
+[21:45:54.729] [AWJ_Split_Screen_+_P2_Inject]   prop: transform -> Transform
+[21:45:54.729] [AWJ_Split_Screen_+_P2_Inject]   prop: gameObject -> GameObject
+[21:45:54.729] [AWJ_Split_Screen_+_P2_Inject]   prop: tag -> String
+[21:45:54.729] [AWJ_Split_Screen_+_P2_Inject]   prop: name -> String
+[21:45:54.731] [AWJ_Split_Screen_+_P2_Inject]   prop: hideFlags -> HideFlags
+[21:45:54.731] [AWJ_Split_Screen_+_P2_Inject] [WebController] Methods (113):
+[21:45:54.731] [AWJ_Split_Screen_+_P2_Inject]   method: add_OnModeChanged(EventHandler value) -> Void
+[21:45:54.731] [AWJ_Split_Screen_+_P2_Inject]   method: remove_OnModeChanged(EventHandler value) -> Void
+[21:45:54.731] [AWJ_Split_Screen_+_P2_Inject]   method: add_OnWebBuild(Action value) -> Void
+[21:45:54.731] [AWJ_Split_Screen_+_P2_Inject]   method: remove_OnWebBuild(Action value) -> Void
+[21:45:54.731] [AWJ_Split_Screen_+_P2_Inject]   method: add_OnMainWebActivated(EventHandler`1 value) -> Void
+[21:45:54.731] [AWJ_Split_Screen_+_P2_Inject]   method: remove_OnMainWebActivated(EventHandler`1 value) -> Void
+[21:45:54.731] [AWJ_Split_Screen_+_P2_Inject]   method: add_OnMainWebDeactivated(EventHandler`1 value) -> Void
+[21:45:54.731] [AWJ_Split_Screen_+_P2_Inject]   method: remove_OnMainWebDeactivated(EventHandler`1 value) -> Void
+[21:45:54.732] [AWJ_Split_Screen_+_P2_Inject]   method: add_OnWebColorChanged(EventHandler`1 value) -> Void
+[21:45:54.732] [AWJ_Split_Screen_+_P2_Inject]   method: remove_OnWebColorChanged(EventHandler`1 value) -> Void
+[21:45:54.732] [AWJ_Split_Screen_+_P2_Inject]   method: get_WebTargetActive() -> Boolean
+[21:45:54.732] [AWJ_Split_Screen_+_P2_Inject]   method: get_WebTarget() -> Transform
+[21:45:54.732] [AWJ_Split_Screen_+_P2_Inject]   method: get_WebTargetObject() -> GameObject
+[21:45:54.732] [AWJ_Split_Screen_+_P2_Inject]   method: get_CanShootWebs() -> Boolean
+[21:45:54.732] [AWJ_Split_Screen_+_P2_Inject]   method: get_WebActive() -> Boolean
+[21:45:54.732] [AWJ_Split_Screen_+_P2_Inject]   method: get_MovingAnchorActive() -> Boolean
+[21:45:54.732] [AWJ_Split_Screen_+_P2_Inject]   method: get_FixedAnchorActive() -> Boolean
+[21:45:54.732] [AWJ_Split_Screen_+_P2_Inject]   method: get_WebAnchorActive() -> Boolean
+[21:45:54.732] [AWJ_Split_Screen_+_P2_Inject]   method: get_WebDirection() -> Vector3
+[21:45:54.732] [AWJ_Split_Screen_+_P2_Inject]   method: get_WebDistance() -> Single
+[21:45:54.732] [AWJ_Split_Screen_+_P2_Inject]   method: get_WebStartPoint() -> Transform
+[21:45:54.732] [AWJ_Split_Screen_+_P2_Inject]   method: get_WebColliderRadius() -> Single
+[21:45:54.732] [AWJ_Split_Screen_+_P2_Inject]   method: get_WebAnchorObject() -> GameObject
+[21:45:54.732] [AWJ_Split_Screen_+_P2_Inject]   method: Awake() -> Void
+[21:45:54.732] [AWJ_Split_Screen_+_P2_Inject]   method: OnEnable() -> Void
+[21:45:54.733] [AWJ_Split_Screen_+_P2_Inject]   method: OnDisable() -> Void
+[21:45:54.733] [AWJ_Split_Screen_+_P2_Inject]   method: Start() -> Void
+[21:45:54.733] [AWJ_Split_Screen_+_P2_Inject]   method: Update() -> Void
+[21:45:54.733] [AWJ_Split_Screen_+_P2_Inject]   method: FixedUpdate() -> Void
+[21:45:54.733] [AWJ_Split_Screen_+_P2_Inject]   method: AssignSounds() -> Void
+[21:45:54.733] [AWJ_Split_Screen_+_P2_Inject]   method: CreateDefaultWeb(DefaultWeb defaultWeb, Color defaultWebColor, Single modifiedWebThickness, WebThread defaultWebThread, Int32 newWebIndex) -> List`1
+[21:45:54.733] [AWJ_Split_Screen_+_P2_Inject]   method: IndicateWeb() -> Void
+[21:45:54.733] [AWJ_Split_Screen_+_P2_Inject]   method: ReleaseWeb(Boolean playAnimation) -> Void
+[21:45:54.733] [AWJ_Split_Screen_+_P2_Inject]   method: ReleaseAnchor() -> Void
+[21:45:54.733] [AWJ_Split_Screen_+_P2_Inject]   method: ReleaseTarget() -> Void
+[21:45:54.733] [AWJ_Split_Screen_+_P2_Inject]   method: ActivateSpringJoint(Boolean preferPlayer) -> Boolean
+[21:45:54.733] [AWJ_Split_Screen_+_P2_Inject]   method: DeactivateSpringJoint(Boolean deactivateMainWeb) -> Void
+[21:45:54.733] [AWJ_Split_Screen_+_P2_Inject]   method: UpdateSpringJointAnchor() -> Void
+[21:45:54.733] [AWJ_Split_Screen_+_P2_Inject]   method: AttachWeb() -> Void
+[21:45:54.733] [AWJ_Split_Screen_+_P2_Inject]   method: PlayBuildWebSound(Transform webStartPosition) -> Void
+[21:45:54.733] [AWJ_Split_Screen_+_P2_Inject]   method: CheckForWebTarget(Single raycastRadiusFactor) -> Void
+[21:45:54.733] [AWJ_Split_Screen_+_P2_Inject]   method: SetWebTarget(RaycastHit hit) -> Void
+[21:45:54.733] [AWJ_Split_Screen_+_P2_Inject]   method: CheckForWebThreadToDestroy() -> Void
+[21:45:54.734] [AWJ_Split_Screen_+_P2_Inject]   method: AttachAnchor() -> Void
+[21:45:54.734] [AWJ_Split_Screen_+_P2_Inject]   method: ApplyWebModifiers(GameObject go) -> Void
+[21:45:54.734] [AWJ_Split_Screen_+_P2_Inject]   method: SetAnchorOnTargetPosition() -> Void
+[21:45:54.734] [AWJ_Split_Screen_+_P2_Inject]   method: BuildWeb() -> Void
+[21:45:54.734] [AWJ_Split_Screen_+_P2_Inject]   method: MoveAnchorOnInvalidWebBuild(WebJoint webJointAnchor, WebJoint webJointTarget, WebThread webThreadTarget, WebThread webThreadAnchor) -> Boolean
+[21:45:54.734] [AWJ_Split_Screen_+_P2_Inject]   method: CanBuildWeb(WebJoint webJointAnchor, WebJoint webJointTarget, WebThread webThreadAnchor, WebThread webThreadTarget) -> Boolean
+[21:45:54.734] [AWJ_Split_Screen_+_P2_Inject]   method: CreateNewWebThread(WebJoint webJointAnchor, WebThread webThreadAnchor, GameObject objectAnchor, Vector3 positionAnchor, WebJoint& newWebJointAnchor, WebJoint webJointTarget, WebThread webThreadTarget, GameObject objectTarget, Vector3 positionTarget, WebJoint& newWebJointTarget, Int32 newWebIndex, Boolean isDefaultWeb, Color color, WebThread webThread) -> WebThread
+[21:45:54.734] [AWJ_Split_Screen_+_P2_Inject]   method: ConnectWebJoints(WebJoint webJoint1, WebJoint webJoint2, Color newWebColor, Boolean playAnimation, WebThread webThread, Int32 newWebIndex) -> WebThread
+[21:45:54.734] [AWJ_Split_Screen_+_P2_Inject]   method: SplitWebThread(WebThread webThreadToSplit, WebJoint newWebJoint) -> Void
+[21:45:54.734] [AWJ_Split_Screen_+_P2_Inject]   method: SplitWebThread(WebThread webThreadToSplit, Vector3 position) -> WebJoint
+[21:45:54.734] [AWJ_Split_Screen_+_P2_Inject]   method: DestroyWebThread(Boolean useWebTargetPosition, Boolean playAnimation) -> Void
+[21:45:54.734] [AWJ_Split_Screen_+_P2_Inject]   method: DestroyPlayerSpringJoint(WebThread webThread) -> Void
+[21:45:54.734] [AWJ_Split_Screen_+_P2_Inject]   method: FixWebImmediate() -> Void
+[21:45:54.734] [AWJ_Split_Screen_+_P2_Inject]   method: FixWeb() -> Void
+[21:45:54.734] [AWJ_Split_Screen_+_P2_Inject]   method: CreateSpringJoint(WebJoint originWebJoint, WebJoint targetWebJoint) -> Void
+[21:45:54.734] [AWJ_Split_Screen_+_P2_Inject]   method: QuickBuild() -> Void
+[21:45:54.734] [AWJ_Split_Screen_+_P2_Inject]   method: SetWebTargetColor() -> Void
+[21:45:54.734] [AWJ_Split_Screen_+_P2_Inject]   method: SetWebTargetColor(Color color) -> Void
+[21:45:54.735] [AWJ_Split_Screen_+_P2_Inject]   method: InitializedSavedWebJoints(List`1 webJointSaveDataList) -> Void
+[21:45:54.735] [AWJ_Split_Screen_+_P2_Inject]   method: InitializeWebThreads(List`1 webJointSaveDataList, List`1 webThreadSaveDataList) -> Void
+[21:45:54.735] [AWJ_Split_Screen_+_P2_Inject]   method: ApplyAncientPotionEffect(AncientPotionEffectSo ancientPotionEffectSo) -> Void
+[21:45:54.735] [AWJ_Split_Screen_+_P2_Inject]   method: RemoveAncientPotionEffect(AncientPotionEffectSo ancientPotionEffectSo) -> Void
+[21:45:54.735] [AWJ_Split_Screen_+_P2_Inject]   method: UpdateHueWebColor() -> Void
+[21:45:54.735] [AWJ_Split_Screen_+_P2_Inject]   method: SetWebThread(WebThread newWebThreadPrefab) -> Void
+[21:45:54.735] [AWJ_Split_Screen_+_P2_Inject]   method: SetWebType(WebType webType) -> Void
+[21:45:54.735] [AWJ_Split_Screen_+_P2_Inject]   method: ShowWebTarget(Boolean value) -> Void
+[21:45:54.735] [AWJ_Split_Screen_+_P2_Inject]   method: ActivateDefaultMode() -> Void
+[21:45:54.735] [AWJ_Split_Screen_+_P2_Inject]   method: Respawn() -> Void
+[21:45:54.735] [AWJ_Split_Screen_+_P2_Inject]   method: ResetWebThickness() -> Void
+[21:45:54.735] [AWJ_Split_Screen_+_P2_Inject]   method: ModifyWebThickness(Single modifiedThickness) -> Void
+[21:45:54.735] [AWJ_Split_Screen_+_P2_Inject]   method: ResetWebColor() -> Void
+[21:45:54.735] [AWJ_Split_Screen_+_P2_Inject]   method: ModifyWebColor(WebThread modifiedWebThread, Color modifiedColor) -> Void
+[21:45:54.735] [AWJ_Split_Screen_+_P2_Inject]   method: SetWebColor(Int32 colorIndex) -> Void
+[21:45:54.735] [AWJ_Split_Screen_+_P2_Inject]   method: RecalculateSpringJoint() -> Void
+[21:45:54.735] [AWJ_Split_Screen_+_P2_Inject]   method: SetWardrobeWebActive(Boolean value) -> Void
+[21:45:54.735] [AWJ_Split_Screen_+_P2_Inject]   method: EnableAiming(Boolean value) -> Void
+[21:45:54.736] [AWJ_Split_Screen_+_P2_Inject]   method: EnableWebShooting(Boolean value) -> Void
+[21:45:54.736] [AWJ_Split_Screen_+_P2_Inject]   method: EnableWebBuilding(Boolean value) -> Void
+[21:45:54.736] [AWJ_Split_Screen_+_P2_Inject]   method: EnableWebDeletion(Boolean value) -> Void
+[21:45:54.736] [AWJ_Split_Screen_+_P2_Inject]   method: EnableQuickBuild(Boolean value) -> Void
+[21:45:54.736] [AWJ_Split_Screen_+_P2_Inject]   method: SetWebDistance(Single value) -> Void
+[21:45:54.736] [AWJ_Split_Screen_+_P2_Inject]   method: DestroyWebJoint(WebJoint webJoint, Boolean playAnimation) -> Void
+[21:45:54.736] [AWJ_Split_Screen_+_P2_Inject]   method: DestroyWebThread(WebThread webThread, Boolean playAnimation) -> Void
+[21:45:54.736] [AWJ_Split_Screen_+_P2_Inject]   method: ToggleWebTargetActive() -> Void
+[21:45:54.736] [AWJ_Split_Screen_+_P2_Inject]   method: MobileQuickBuild() -> Void
+[21:45:54.736] [AWJ_Split_Screen_+_P2_Inject]   method: MobileFixedAnchor() -> Void
+[21:45:54.736] [AWJ_Split_Screen_+_P2_Inject]   method: MobileMovingAnchor() -> Void
+[21:45:54.736] [AWJ_Split_Screen_+_P2_Inject]   method: MobileToggleWeb() -> Void
+[21:45:54.736] [AWJ_Split_Screen_+_P2_Inject]   method: MobileShootWeb(Boolean value) -> Void
+[21:45:54.736] [AWJ_Split_Screen_+_P2_Inject]   method: MobileDeleteWeb() -> Void
+[21:45:54.736] [AWJ_Split_Screen_+_P2_Inject]   method: MobileDeleteWebButtonReleased() -> Void
+[21:45:54.736] [AWJ_Split_Screen_+_P2_Inject]   method: SetWebColorPalette(WebColorPaletteSO colorPalette) -> Void
+[21:45:54.736] [AWJ_Split_Screen_+_P2_Inject]   method: DestroyAllPlayerWebs(Boolean playAnimation) -> Void
+[21:45:54.736] [AWJ_Split_Screen_+_P2_Inject]   method: GetWebJointSaveDataList() -> List`1
+[21:45:54.737] [AWJ_Split_Screen_+_P2_Inject]   method: GetWebThreadSaveDataList() -> List`1
+[21:45:54.737] [AWJ_Split_Screen_+_P2_Inject]   method: InitializeSavedWebs(List`1 webJointSaveDataList, List`1 webThreadSaveDataList) -> Void
+[21:45:54.737] [AWJ_Split_Screen_+_P2_Inject]   method: IsWebAttached(Rigidbody rigidbodyToCheck) -> Boolean
+[21:45:54.737] [AWJ_Split_Screen_+_P2_Inject]   method: CatchFly(WebThread webThreadToSplit, WebJoint webJointFly) -> Void
+[21:45:54.737] [AWJ_Split_Screen_+_P2_Inject]   method: RemoveWebJointFromList(WebJoint webJointToRemove) -> Void
+[21:45:54.737] [AWJ_Split_Screen_+_P2_Inject]   method: OnShootWeb(CallbackContext ctx) -> Void
+[21:45:54.737] [AWJ_Split_Screen_+_P2_Inject]   method: OnAttachFixedAnchor(CallbackContext ctx) -> Void
+[21:45:54.737] [AWJ_Split_Screen_+_P2_Inject]   method: OnAttachMovingAnchor(CallbackContext ctx) -> Void
+[21:45:54.737] [AWJ_Split_Screen_+_P2_Inject]   method: OnDeleteWeb(CallbackContext ctx) -> Void
+[21:45:54.737] [AWJ_Split_Screen_+_P2_Inject]   method: OnQuickBuild(CallbackContext ctx) -> Void
+[21:45:54.737] [AWJ_Split_Screen_+_P2_Inject]   method: AttachWebToPlayer() -> Void
+[21:45:54.737] [AWJ_Split_Screen_+_P2_Inject]   method: GameController_OnPauseGame(Object sender, EventArgs e) -> Void
+[21:45:54.737] [AWJ_Split_Screen_+_P2_Inject]   method: AncientPotionController_OnEffectStarted(AncientPotionEffectSo ancientPotionEffectSo) -> Void
+[21:45:54.737] [AWJ_Split_Screen_+_P2_Inject]   method: AncientPotionController_OnEffectEnded(AncientPotionEffectSo ancientPotionEffectSo) -> Void
+[21:45:54.737] [AWJ_Split_Screen_+_P2_Inject]   method: OnWebBuild_UpdateHueWebColor() -> Void
+[21:45:54.737] [AWJ_Split_Screen_+_P2_Inject]   method: OnMainWebActivated_UpdateHueWebColor(Object sender, OnMainWebActivatedEventArgs e) -> Void
+[21:45:54.737] [AWJ_Split_Screen_+_P2_Inject] [WebController] get_WebStartPoint: True ret=Transform
+[21:45:54.739] [AWJ_Split_Screen_+_P2_Inject] [WebController] get_WebDirection: True ret=Vector3
+[21:45:54.767] [AWJ_Split_Screen_+_P2_Inject] Patched WebController: Update/Fixed + WebStartPoint/WebDirection + 5 CallbackContext filters.
+[21:45:54.767] [AWJ_Split_Screen_+_P2_Inject] [WebController] CheckForWebTarget: True ret=Void params=1
+[21:45:54.787] [AWJ_Split_Screen_+_P2_Inject] Patched WebController.CheckForWebTarget.
+[21:45:54.840] [AWJ_Split_Screen_+_P2_Inject] Patched CameraController.InputTransform + CallbackContext filter for P2.
+[21:45:54.895] [AWJ_Split_Screen_+_P2_Inject] Patched CameraMouseLook.OnLook to block P2 gamepad input.
+[21:45:54.898] [AWJ_Split_Screen_+_P2_Inject] Patched Camera.main getter for P2.
+[21:45:54.898] [AWJ_Split_Screen_+_P2_Inject] AWJ Split Screen + P2 Inject v0.2.2 loaded.
+[21:45:54.898] [AWJ_Split_Screen_+_P2_Inject] F9 split, F10 orientation | P2 Move: IJKL or Gamepad LStick | P2 Look: N/M or RStickX | P2 Jump: A | P2 Web: U/RT shoot, P/LT attach, O/B delete, RightCtrl/RB release.
+[21:45:54.898] [AWJ_Split_Screen_+_P2_Inject] Tip: If both controllers still move P1, ensure FilterP1FromP2Gamepad=true and P2_GamepadIndex is the second pad (usually 1).
+[21:45:54.902] [UnityExplorer] UnityExplorer 4.9.0 initializing...
+[21:45:54.919] [UnityExplorer] [UniverseLib] UniverseLib 1.5.1 initializing...
+[21:45:55.509] [UnityExplorer] [UniverseLib] Finished UniverseLib initial setup.
+[21:45:55.520] [UnityExplorer] Initialized UnityCrashPrevention for: Canvas.get_renderingDisplaySize
+[21:46:01.529] [AWJ_Split_Screen_+_P2_Inject] [P2CamDebug] DISABLED behaviour: UnityEngine.Rendering.Universal.UniversalAdditionalCameraData on Main Camera_P2
+[21:46:01.529] [AWJ_Split_Screen_+_P2_Inject] [P2CamDebug] Disabled 1 camera driver behaviour(s) on P2 camera clone.
+[21:46:01.530] [AWJ_Split_Screen_+_P2_Inject] [P2CamDebug] Components on P2 camera clone (4):
+[21:46:01.530] [AWJ_Split_Screen_+_P2_Inject]   [0] UnityEngine.Transform enabled=n/a go=Main Camera_P2
+[21:46:01.530] [AWJ_Split_Screen_+_P2_Inject]   [1] UnityEngine.Camera enabled=ON go=Main Camera_P2
+[21:46:01.530] [AWJ_Split_Screen_+_P2_Inject]   [2] UnityEngine.AudioListener enabled=OFF go=Main Camera_P2
+[21:46:01.531] [AWJ_Split_Screen_+_P2_Inject]   [3] UnityEngine.Rendering.Universal.UniversalAdditionalCameraData enabled=OFF go=Main Camera_P2
+[21:46:01.582] [AWJ_Split_Screen_+_P2_Inject] WebController cached: False
+[21:46:01.586] [AWJ_Split_Screen_+_P2_Inject] Couldn't find PlayerSpider. Make sure you're in a scene where it exists.
+[21:46:03.254] [UnityExplorer] [UniverseLib] Initialized new InputSystem support.
+[21:46:03.317] [UnityExplorer] [UniverseLib] Loaded modern bundle for Unity 6000.2.6f2
+[21:46:03.339] [UnityExplorer] [UniverseLib] UniverseLib 1.5.1 initialized.
+[21:46:03.340] [UnityExplorer] Creating UI...
+[21:46:04.017] [UnityExplorer] UnityExplorer 4.9.0 (Mono) initialized.
+[21:46:04.256] [AWJ_Split_Screen_+_P2_Inject] [P2CamDebug] DISABLED behaviour: UnityEngine.Rendering.Universal.UniversalAdditionalCameraData on Main Camera_P2
+[21:46:04.256] [AWJ_Split_Screen_+_P2_Inject] [P2CamDebug] Disabled 1 camera driver behaviour(s) on P2 camera clone.
+[21:46:04.257] [AWJ_Split_Screen_+_P2_Inject] [P2CamDebug] Components on P2 camera clone (4):
+[21:46:04.257] [AWJ_Split_Screen_+_P2_Inject]   [0] UnityEngine.RectTransform enabled=n/a go=Main Camera_P2
+[21:46:04.257] [AWJ_Split_Screen_+_P2_Inject]   [1] UnityEngine.Camera enabled=ON go=Main Camera_P2
+[21:46:04.257] [AWJ_Split_Screen_+_P2_Inject]   [2] UnityEngine.Rendering.Universal.UniversalAdditionalCameraData enabled=OFF go=Main Camera_P2
+[21:46:04.257] [AWJ_Split_Screen_+_P2_Inject]   [3] FMODUnity.StudioListener enabled=ON go=Main Camera_P2
+[21:46:04.308] [AWJ_Split_Screen_+_P2_Inject] WebController cached: False
+[21:46:04.328] [AWJ_Split_Screen_+_P2_Inject] Couldn't find PlayerSpider. Make sure you're in a scene where it exists.
+[21:46:09.219] [AWJ_Split_Screen_+_P2_Inject] [P2CamDebug] DISABLED behaviour: UnityEngine.Rendering.Universal.UniversalAdditionalCameraData on Main Camera_P2
+[21:46:09.220] [AWJ_Split_Screen_+_P2_Inject] [P2CamDebug] DISABLED behaviour: Cinemachine.CinemachineBrain on Main Camera_P2
+[21:46:09.220] [AWJ_Split_Screen_+_P2_Inject] [P2CamDebug] DISABLED behaviour: _Scripts.Camera.CameraWaterTrigger on Main Camera_P2
+[21:46:09.220] [AWJ_Split_Screen_+_P2_Inject] [P2CamDebug] DISABLED behaviour: UnityEngine.Rendering.Universal.UniversalAdditionalCameraData on Dialogue Camera
+[21:46:09.220] [AWJ_Split_Screen_+_P2_Inject] [P2CamDebug] Disabled 4 camera driver behaviour(s) on P2 camera clone.
+[21:46:09.220] [AWJ_Split_Screen_+_P2_Inject] [P2CamDebug] Components on P2 camera clone (11):
+[21:46:09.221] [AWJ_Split_Screen_+_P2_Inject]   [0] UnityEngine.Transform enabled=n/a go=Main Camera_P2
+[21:46:09.221] [AWJ_Split_Screen_+_P2_Inject]   [1] UnityEngine.Camera enabled=ON go=Main Camera_P2
+[21:46:09.221] [AWJ_Split_Screen_+_P2_Inject]   [2] UnityEngine.Rendering.Universal.UniversalAdditionalCameraData enabled=OFF go=Main Camera_P2
+[21:46:09.221] [AWJ_Split_Screen_+_P2_Inject]   [3] Cinemachine.CinemachineBrain enabled=OFF go=Main Camera_P2
+[21:46:09.221] [AWJ_Split_Screen_+_P2_Inject]   [4] _Scripts.Camera.CameraWaterTrigger enabled=OFF go=Main Camera_P2
+[21:46:09.221] [AWJ_Split_Screen_+_P2_Inject]   [5] UnityEngine.SphereCollider enabled=n/a go=Main Camera_P2
+[21:46:09.221] [AWJ_Split_Screen_+_P2_Inject]   [6] UnityEngine.Rigidbody enabled=n/a go=Main Camera_P2
+[21:46:09.221] [AWJ_Split_Screen_+_P2_Inject]   [7] ShaderInteractor enabled=ON go=Main Camera_P2
+[21:46:09.221] [AWJ_Split_Screen_+_P2_Inject]   [8] UnityEngine.Transform enabled=n/a go=Dialogue Camera
+[21:46:09.221] [AWJ_Split_Screen_+_P2_Inject]   [9] UnityEngine.Camera enabled=ON go=Dialogue Camera
+[21:46:09.221] [AWJ_Split_Screen_+_P2_Inject]   [10] UnityEngine.Rendering.Universal.UniversalAdditionalCameraData enabled=OFF go=Dialogue Camera
+[21:46:09.268] [AWJ_Split_Screen_+_P2_Inject] WebController cached: True
+[21:46:09.572] [AWJ_Split_Screen_+_P2_Inject] Replaced 8 LegController(s) with P2LegDriver on P2.
+[21:46:09.574] [AWJ_Split_Screen_+_P2_Inject] Rebuilt 1 RigBuilder(s) on P2.
+[21:46:09.617] [AWJ_Split_Screen_+_P2_Inject] Set isPlayer=false on 1 P2 BodyMovement(s).
+[21:46:09.617] [AWJ_Split_Screen_+_P2_Inject] Nulled followTarget on P2 BodyMovement(s).
+[21:46:09.661] [AWJ_Split_Screen_+_P2_Inject] Cleared legs list on 1 P2 MasterLegController(s).
+[21:46:09.661] [AWJ_Split_Screen_+_P2_Inject] Set 1217 P2 GameObjects to layer 2 (Ignore Raycast).
+[21:46:09.794] [AWJ_Split_Screen_+_P2_Inject] [P2CamDebug] InitP2CameraRig done: dist=14.00 height=1.00 camDir=(0.00, 0.26, -0.97) camPos=(3.00, 40.50, -10.52) camRot=(15.11, 0.00, 0.00)
+[21:46:09.796] [AWJ_Split_Screen_+_P2_Inject] [P2WebManager] Init begin
+[21:46:09.796] [AWJ_Split_Screen_+_P2_Inject] [P2WebManager] CacheWebControllerMethods: shoot=True delete=True check=True
+[21:46:09.799] [AWJ_Split_Screen_+_P2_Inject] [P2WebManager] Skip TryReadP1TargetParams (missing dependency): Could not load file or assembly 'MonoMod.Backports, Version=1.1.0.0, Culture=neutral, PublicKeyToken=null' or one of its dependencies.
+[21:46:09.799] [AWJ_Split_Screen_+_P2_Inject] [P2WebManager] P1 WebStartPoint Transform: Root pos=(0.00, 37.52, 0.00)
+[21:46:09.800] [AWJ_Split_Screen_+_P2_Inject] [P2WebManager] WebStartPoint height offset: 1.666
+[21:46:09.801] [AWJ_Split_Screen_+_P2_Inject] [P2WebManager] Created target dot sphere.
+[21:46:09.801] [AWJ_Split_Screen_+_P2_Inject] [P2WebManager] Initialized. | ShootWeb=True | DeleteWeb=True | CheckForWebTarget=True | Rigidbody=True | TargetDot=True | P1MaxDist=50 | P1Scale=0.5 | P2Offset=0.05 | WebStartHeight=1.67
+[21:46:09.801] [AWJ_Split_Screen_+_P2_Inject] Spawned P2: PlayerSpider_P2 | P2InputTransform=InputTransform | P2WebManager=True
+[21:46:09.806] [AWJ_Split_Screen_+_P2_Inject] [P2CamDebug] UpdateP2CameraLook: anchor=InputTransform anchorPos=(3.00, 35.85, 3.00) surfUp=(0.00, 1.00, 0.00) camDir=(0.00, 0.26, -0.97) dist=14.00 height=1.00 | prePos=(3.00, 40.50, -10.52) wantPos=(3.00, 40.50, -10.52) preDelta=0.000 | wantRot=(15.11, 0.00, 0.00) | p1CamPos=(0.00, 45.85, -36.80)
+[21:46:09.845] [AWJ_Split_Screen_+_P2_Inject] [P2WebManager] TICK #1 | shootHeld=False attachHeld=False | cam=True rb=True | dot=False | grapple=False joint=False | line=False
+[21:46:11.150] [AWJ_Split_Screen_+_P2_Inject] [P2CamDebug] UpdateP2CameraLook: anchor=InputTransform anchorPos=(2.92, 36.17, 2.92) surfUp=(0.00, 1.00, 0.00) camDir=(0.00, 0.26, -0.97) dist=14.00 height=1.00 | prePos=(2.92, 40.82, -10.60) wantPos=(2.92, 40.82, -10.60) preDelta=0.000 | wantRot=(15.11, 0.00, 0.00) | p1CamPos=(0.00, 41.00, -24.77)
+[21:46:11.819] [AWJ_Split_Screen_+_P2_Inject] [P2WebManager] TICK #358 | shootHeld=False attachHeld=False | cam=True rb=True | dot=True | grapple=False joint=False | line=False
+[21:46:13.152] [AWJ_Split_Screen_+_P2_Inject] [P2CamDebug] UpdateP2CameraLook: anchor=InputTransform anchorPos=(2.92, 36.17, 2.92) surfUp=(0.00, 1.00, 0.00) camDir=(0.00, 0.26, -0.97) dist=14.00 height=1.00 | prePos=(2.92, 40.82, -10.59) wantPos=(2.92, 40.82, -10.59) preDelta=0.000 | wantRot=(15.11, 0.00, 0.00) | p1CamPos=(0.00, 41.00, -24.80)
+[21:46:13.822] [AWJ_Split_Screen_+_P2_Inject] [P2WebManager] TICK #827 | shootHeld=False attachHeld=False | cam=True rb=True | dot=True | grapple=False joint=False | line=False
+[21:46:15.154] [AWJ_Split_Screen_+_P2_Inject] [P2CamDebug] UpdateP2CameraLook: anchor=InputTransform anchorPos=(1.43, 36.18, 4.74) surfUp=(0.00, 1.00, 0.00) camDir=(-0.11, 0.52, -0.85) dist=14.00 height=1.00 | prePos=(-0.10, 44.40, -7.16) wantPos=(-0.09, 44.47, -7.12) preDelta=0.080 | wantRot=(31.37, 7.28, 0.00) | p1CamPos=(0.00, 41.00, -24.80)
+[21:46:15.825] [AWJ_Split_Screen_+_P2_Inject] [P2WebManager] TICK #1296 | shootHeld=False attachHeld=False | cam=True rb=True | dot=True | grapple=False joint=False | line=False
+[21:46:17.155] [AWJ_Split_Screen_+_P2_Inject] [P2CamDebug] UpdateP2CameraLook: anchor=InputTransform anchorPos=(3.21, 36.17, 14.39) surfUp=(0.00, 1.00, 0.00) camDir=(0.25, -0.39, -0.89) dist=14.00 height=1.00 | prePos=(6.65, 31.81, 1.92) wantPos=(6.65, 31.75, 1.95) preDelta=0.073 | wantRot=(337.22, 344.51, 0.00) | p1CamPos=(0.00, 41.00, -24.80)
+[21:46:17.825] [AWJ_Split_Screen_+_P2_Inject] [P2WebManager] TICK #1797 | shootHeld=False attachHeld=False | cam=True rb=True | dot=True | grapple=False joint=False | line=False
+[21:46:19.159] [AWJ_Split_Screen_+_P2_Inject] [P2CamDebug] UpdateP2CameraLook: anchor=InputTransform anchorPos=(3.55, 36.17, 17.35) surfUp=(0.00, 1.00, 0.00) camDir=(0.72, 0.42, -0.56) dist=14.00 height=1.00 | prePos=(13.65, 42.98, 9.58) wantPos=(13.60, 43.04, 9.56) preDelta=0.079 | wantRot=(24.79, 307.79, 0.00) | p1CamPos=(0.00, 41.00, -24.80)
+[21:46:19.826] [AWJ_Split_Screen_+_P2_Inject] [P2WebManager] TICK #2269 | shootHeld=False attachHeld=False | cam=True rb=True | dot=False | grapple=False joint=False | line=False
+[21:46:21.159] [AWJ_Split_Screen_+_P2_Inject] [P2CamDebug] UpdateP2CameraLook: anchor=InputTransform anchorPos=(5.71, 36.17, 13.31) surfUp=(0.00, 1.00, 0.00) camDir=(0.96, 0.06, 0.29) dist=14.00 height=1.00 | prePos=(19.09, 37.97, 17.35) wantPos=(19.09, 37.97, 17.35) preDelta=0.000 | wantRot=(3.28, 253.21, 0.00) | p1CamPos=(0.00, 41.00, -24.80)
+[21:46:21.826] [AWJ_Split_Screen_+_P2_Inject] [P2WebManager] TICK #2736 | shootHeld=False attachHeld=False | cam=True rb=True | dot=True | grapple=False joint=False | line=False
+[21:46:23.163] [AWJ_Split_Screen_+_P2_Inject] [P2CamDebug] UpdateP2CameraLook: anchor=InputTransform anchorPos=(5.71, 36.17, 13.31) surfUp=(0.00, 1.00, 0.00) camDir=(0.96, 0.06, 0.29) dist=14.00 height=1.00 | prePos=(19.10, 37.97, 17.35) wantPos=(19.10, 37.97, 17.35) preDelta=0.000 | wantRot=(3.28, 253.21, 0.00) | p1CamPos=(3.28, 49.24, -23.16)
+[21:46:23.828] [AWJ_Split_Screen_+_P2_Inject] [P2WebManager] TICK #3193 | shootHeld=False attachHeld=False | cam=True rb=True | dot=True | grapple=False joint=False | line=False
+[21:46:28.965] [AWJ_Split_Screen_+_P2_Inject] [P2WebManager] TICK #3300 | shootHeld=False attachHeld=False | cam=True rb=True | dot=True | grapple=False joint=False | line=False
+[21:46:28.966] [AWJ_Split_Screen_+_P2_Inject] [P2CamDebug] UpdateP2CameraLook: anchor=InputTransform anchorPos=(5.71, 36.17, 13.31) surfUp=(0.00, 1.00, 0.00) camDir=(0.96, 0.06, 0.29) dist=14.00 height=1.00 | prePos=(19.10, 37.97, 17.35) wantPos=(19.10, 37.97, 17.35) preDelta=0.000 | wantRot=(3.28, 253.21, 0.00) | p1CamPos=(10.62, 45.77, -21.90)
+[21:46:30.194] Preferences Saved!

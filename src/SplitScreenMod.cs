@@ -69,15 +69,17 @@ namespace AWJSplitScreen
         internal static GameObject _p2Spider;
         private Transform _p1InputTransform;
 
-        private float _p2CamYaw;
-        private float _p2CamPitch;
+        private Vector3 _p2CamDir;        // direction from pivot to camera (normalized)
+        private Vector3 _p2SmoothUp;      // smoothed spider surface up (lerped each frame)
         private float _p2CamDistance;
         private bool _p2CamRigInited;
+        private float _p2CamBaseHeight;   // local Y offset (up from InputTransform)
+        private float _p2CamBaseDist;     // horizontal distance behind
+        private bool _p2CamBasePoseCached;
+        private int _p2CamRecaptureFrame;  // frame at which to re-read P1 camera distance
+        private float _p2CamDebugNextLog;
 
-        // WebController — P1's singleton, passed to P2WebManager for cloning
         private Component _webController;
-
-        // Independent P2 web system
         private P2WebManager _p2WebManager;
 
         public override void OnInitializeMelon()
@@ -117,7 +119,7 @@ namespace AWJSplitScreen
             P2Deadzone = _p2DeadzonePref.Value;
             P2TriggerThreshold = _p2TriggerThresholdPref.Value;
             FilterP1FromP2Gamepad = _filterP1FromP2PadPref.Value;
-            P2CameraDistance = Mathf.Clamp(_p2CameraDistancePref.Value, 5.5f, 14f);
+            P2CameraDistance = Mathf.Clamp(_p2CameraDistancePref.Value, 1.0f, 14f);
             DebugCameraInput = _debugCameraInputPref.Value;
         }
 
@@ -455,12 +457,18 @@ namespace AWJSplitScreen
                 if (InputCompat.IsP2JumpPressedNow(P2UseGamepad, P2GamepadIndex))
                     P2JumpPressed = true;
 
-                UpdateP2CameraLook();
-
                 // Drive P2's independent web system
                 if (_p2WebManager != null)
                     _p2WebManager.DriveInput();
             }
+        }
+
+        public override void OnLateUpdate()
+        {
+            if (_enabled == null || !_enabled.Value)
+                return;
+
+            UpdateP2CameraLook();
         }
 
 
@@ -488,6 +496,22 @@ namespace AWJSplitScreen
             if (al != null) al.enabled = false;
 
             DisableComponentByTypeName(_camRightOrBottom.gameObject, "Cinemachine.CinemachineBrain");
+            DisableCameraDriverBehaviours(_camRightOrBottom.gameObject);
+
+            // DEBUG: dump every component still on the P2 camera clone
+            try
+            {
+                var allComps = _camRightOrBottom.GetComponentsInChildren<Component>(true);
+                LoggerInstance.Msg("[P2CamDebug] Components on P2 camera clone (" + allComps.Length + "):");
+                for (int i = 0; i < allComps.Length; i++)
+                {
+                    if (allComps[i] == null) continue;
+                    var b = allComps[i] as Behaviour;
+                    string en = b != null ? (b.enabled ? "ON" : "OFF") : "n/a";
+                    LoggerInstance.Msg("  [" + i + "] " + allComps[i].GetType().FullName + " enabled=" + en + " go=" + allComps[i].gameObject.name);
+                }
+            }
+            catch (Exception ex) { LoggerInstance.Warning("[P2CamDebug] component dump failed: " + ex); }
 
             P2Camera = _camRightOrBottom;
 
@@ -772,6 +796,7 @@ namespace AWJSplitScreen
 
                 P2InputTransform = it;
                 _p2CamRigInited = false;
+                InitP2CameraRig();
             }
 
             // Initialize independent P2 web system
@@ -780,7 +805,7 @@ namespace AWJSplitScreen
                 if (_webController != null && P2Camera != null && P2InputTransform != null)
                 {
                     _p2WebManager = _p2Spider.AddComponent<P2WebManager>();
-                    _p2WebManager.Init(_webController, P2Camera, P2InputTransform, _p2Spider, LoggerInstance);
+                    _p2WebManager.Init(_webController, P2Camera, P2InputTransform, _p2Spider, LoggerInstance, _p1InputTransform);
                 }
                 else
                 {
@@ -798,24 +823,109 @@ namespace AWJSplitScreen
                                " | P2WebManager=" + (_p2WebManager != null));
         }
 
+        private void InitP2CameraRig()
+        {
+            if (_camRightOrBottom == null || (P2InputTransform == null && _p2Spider == null))
+            {
+                LoggerInstance.Msg("[P2CamDebug] InitP2CameraRig BAIL: camR=" + (_camRightOrBottom != null)
+                    + " P2IT=" + (P2InputTransform != null) + " p2Spider=" + (_p2Spider != null));
+                return;
+            }
+
+            // Only read P1's camera offset on the very first init (at spawn).
+            if (!_p2CamBasePoseCached)
+            {
+                _p2CamBaseHeight = 1.0f;
+                _p2CamBaseDist = P2CameraDistance;
+
+                if (_camLeftOrTop != null && _p1InputTransform != null)
+                {
+                    var delta = _camLeftOrTop.transform.position - _p1InputTransform.position;
+                    var hDist = new Vector3(delta.x, 0f, delta.z).magnitude;
+                    LoggerInstance.Msg("[P2CamDebug] P1 camera offset: delta=" + delta
+                        + " hDist=" + hDist.ToString("F2") + " height=" + delta.y.ToString("F2"));
+                    if (hDist > 0.3f && hDist < 60f)
+                    {
+                        _p2CamBaseDist = hDist;
+                        _p2CamBaseHeight = delta.y;
+                    }
+                }
+                _p2CamBasePoseCached = true;
+            }
+
+            _p2CamDistance = _p2CamBaseDist;
+
+            // Initialize camera direction: behind and slightly above the spider
+            var p2Anchor = P2InputTransform != null ? P2InputTransform : _p2Spider.transform;
+            _p2SmoothUp = p2Anchor.up;
+            var surfUp = _p2SmoothUp;
+            var behind = -Vector3.ProjectOnPlane(p2Anchor.forward, surfUp).normalized;
+            if (behind.sqrMagnitude < 0.001f) behind = -p2Anchor.forward;
+            // Tilt upward slightly (15 degrees worth)
+            _p2CamDir = (behind + surfUp * 0.27f).normalized;
+
+            _p2CamRigInited = true;
+            // Schedule a re-read of P1's camera distance after Cinemachine settles (~1.5s at 60fps)
+            _p2CamRecaptureFrame = Time.frameCount + 90;
+
+            ApplyP2CameraTransform();
+
+            LoggerInstance.Msg("[P2CamDebug] InitP2CameraRig done: dist=" + _p2CamDistance.ToString("F2")
+                + " height=" + _p2CamBaseHeight.ToString("F2")
+                + " camDir=" + _p2CamDir
+                + " camPos=" + _camRightOrBottom.transform.position + " camRot=" + _camRightOrBottom.transform.rotation.eulerAngles);
+        }
+
+        private void ApplyP2CameraTransform()
+        {
+            var p2Anchor = P2InputTransform != null ? P2InputTransform : _p2Spider.transform;
+
+            // Pivot above spider along smoothed surface up
+            var pivot = p2Anchor.position + _p2SmoothUp * _p2CamBaseHeight;
+
+            // Camera position along the orbit direction
+            var desiredPos = pivot + _p2CamDir * _p2CamDistance;
+
+            // Look ABOVE the pivot so the spider sits in the lower portion of the screen,
+            // matching P1's Cinemachine framing. Screen center then points at the horizon/walls
+            // ahead, which is where the target dot ray (camera.forward) should hit.
+            float lookAbove = _p2CamDistance * 0.15f;
+            var lookTarget = pivot + Vector3.up * lookAbove;
+            var lookDir = lookTarget - desiredPos;
+            if (lookDir.sqrMagnitude > 0.001f)
+                _camRightOrBottom.transform.rotation = Quaternion.LookRotation(lookDir, Vector3.up);
+            _camRightOrBottom.transform.position = desiredPos;
+        }
+
         private void UpdateP2CameraLook()
         {
             if (_camRightOrBottom == null) return;
-            if (P2InputTransform == null) return;
-
-            var pivot = P2InputTransform.position + (Vector3.up * 1.2f);
+            if (P2InputTransform == null && _p2Spider == null) return;
 
             if (!_p2CamRigInited)
-            {
-                var rel = _camRightOrBottom.transform.position - pivot;
-                if (rel.sqrMagnitude < 0.25f)
-                    rel = new Vector3(0f, 1.9f, -5.6f);
+                InitP2CameraRig();
 
-                _p2CamDistance = Mathf.Clamp(P2CameraDistance, 3.5f, 12f);
-                _p2CamPitch = Mathf.Clamp(Mathf.Atan2(rel.y, Mathf.Max(0.01f, _p2CamDistance)) * Mathf.Rad2Deg, -10f, 55f);
-                _p2CamYaw = Mathf.Atan2(rel.x, rel.z) * Mathf.Rad2Deg;
-                _p2CamRigInited = true;
+            // Delayed recapture: re-read P1's camera distance after Cinemachine settles
+            if (_p2CamRecaptureFrame > 0 && Time.frameCount >= _p2CamRecaptureFrame)
+            {
+                _p2CamRecaptureFrame = 0;
+                if (_camLeftOrTop != null && _p1InputTransform != null)
+                {
+                    var delta = _camLeftOrTop.transform.position - _p1InputTransform.position;
+                    var hDist = new Vector3(delta.x, 0f, delta.z).magnitude;
+                    if (hDist > 0.3f && hDist < 60f)
+                    {
+                        _p2CamBaseDist = hDist;
+                        _p2CamBaseHeight = delta.y;
+                        _p2CamDistance = _p2CamBaseDist;
+                        LoggerInstance.Msg("[P2CamDebug] Recaptured P1 camera offset: hDist=" + hDist.ToString("F2")
+                            + " height=" + delta.y.ToString("F2")
+                            + " (settled after " + 90 + " frames)");
+                    }
+                }
             }
+
+            var prePos = _camRightOrBottom.transform.position;
 
             float yawInput = 0f;
             if (InputCompat.Held_N()) yawInput -= 1f;
@@ -832,15 +942,52 @@ namespace AWJSplitScreen
 
             var speed = _p2LookSpeed != null ? _p2LookSpeed.Value : 90f;
             var dt = Time.deltaTime;
+            float yawDelta = yawInput * speed * dt;
+            float pitchDelta = -pitchInput * speed * dt;
 
-            _p2CamYaw += yawInput * speed * dt;
-            _p2CamPitch = Mathf.Clamp(_p2CamPitch - (pitchInput * speed * dt), -25f, 65f);
+            // --- Incremental orbit ---
+            // Orbit uses a smoothed version of the spider's surface normal as the "up" axis.
+            // On flat ground this is ~world-up; on walls it smoothly becomes the wall normal.
+            var p2Anchor = P2InputTransform != null ? P2InputTransform : _p2Spider.transform;
+            _p2SmoothUp = Vector3.Slerp(_p2SmoothUp, p2Anchor.up, dt * 3f).normalized;
+            var surfUp = _p2SmoothUp;
 
-            var rot = Quaternion.Euler(_p2CamPitch, _p2CamYaw, 0f);
-            var camPos = pivot - (rot * Vector3.forward * _p2CamDistance);
+            // Yaw: rotate camera direction around the surface normal
+            if (Mathf.Abs(yawDelta) > 0.001f)
+                _p2CamDir = Quaternion.AngleAxis(yawDelta, surfUp) * _p2CamDir;
 
-            _camRightOrBottom.transform.position = camPos;
-            _camRightOrBottom.transform.rotation = rot;
+            // Pitch: rotate around the local right axis (perpendicular to surfUp and camDir)
+            if (Mathf.Abs(pitchDelta) > 0.001f)
+            {
+                var right = Vector3.Cross(surfUp, _p2CamDir).normalized;
+                if (right.sqrMagnitude > 0.001f)
+                {
+                    var newDir = Quaternion.AngleAxis(pitchDelta, right) * _p2CamDir;
+                    // Clamp pitch: don't let camera go below surface plane or directly overhead
+                    float angleFromUp = Vector3.Angle(newDir, surfUp);
+                    if (angleFromUp > 15f && angleFromUp < 165f)
+                        _p2CamDir = newDir.normalized;
+                }
+            }
+
+            _p2CamDir = _p2CamDir.normalized;
+
+            ApplyP2CameraTransform();
+
+            // Throttled debug log every 2 seconds
+            if (Time.unscaledTime >= _p2CamDebugNextLog)
+            {
+                _p2CamDebugNextLog = Time.unscaledTime + 2f;
+                var wantPos = _camRightOrBottom.transform.position;
+                var delta = (prePos - wantPos).magnitude;
+                LoggerInstance.Msg("[P2CamDebug] UpdateP2CameraLook:"
+                    + " anchor=" + p2Anchor.name + " anchorPos=" + p2Anchor.position
+                    + " surfUp=" + surfUp + " camDir=" + _p2CamDir
+                    + " dist=" + _p2CamDistance.ToString("F2") + " height=" + _p2CamBaseHeight.ToString("F2")
+                    + " | prePos=" + prePos + " wantPos=" + wantPos + " preDelta=" + delta.ToString("F3")
+                    + " | wantRot=" + _camRightOrBottom.transform.rotation.eulerAngles
+                    + " | p1CamPos=" + (_camLeftOrTop != null ? _camLeftOrTop.transform.position.ToString() : "null"));
+            }
         }
 
         private static float NormalizeSignedAngle(float angle)
@@ -902,6 +1049,40 @@ namespace AWJSplitScreen
             if (c != null) c.enabled = false;
         }
 
+        private void DisableCameraDriverBehaviours(GameObject root)
+        {
+            if (root == null)
+                return;
+
+            int disabled = 0;
+            var behaviours = root.GetComponentsInChildren<Behaviour>(true);
+            if (behaviours == null)
+                return;
+
+            for (int i = 0; i < behaviours.Length; i++)
+            {
+                var behaviour = behaviours[i];
+                if (behaviour == null) continue;
+                if (behaviour is Camera) continue;
+                if (behaviour is AudioListener) continue;
+
+                var fullName = behaviour.GetType().FullName;
+                if (string.IsNullOrEmpty(fullName)) continue;
+
+                if (fullName.StartsWith("_Scripts.Camera.", StringComparison.Ordinal) ||
+                    fullName.StartsWith("_Scripts.Singletons.", StringComparison.Ordinal) ||
+                    fullName.IndexOf("Camera", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    string.Equals(fullName, "Cinemachine.CinemachineBrain", StringComparison.Ordinal))
+                {
+                    behaviour.enabled = false;
+                    disabled++;
+                    LoggerInstance.Msg("[P2CamDebug] DISABLED behaviour: " + fullName + " on " + behaviour.gameObject.name);
+                }
+            }
+
+            LoggerInstance.Msg("[P2CamDebug] Disabled " + disabled + " camera driver behaviour(s) on P2 camera clone.");
+        }
+
         private static void DestroyComponentByTypeName(GameObject root, string fullTypeName)
         {
             var t = AccessTools.TypeByName(fullTypeName);
@@ -945,6 +1126,7 @@ namespace AWJSplitScreen
 
             _p1InputTransform = null;
             _p2CamRigInited = false;
+            _p2CamBasePoseCached = false;
 
             P2InputTransform = null;
             P2Camera = null;
@@ -994,6 +1176,7 @@ namespace AWJSplitScreen
         // P1-derived parameters (read via reflection/logging)
         private float _p1MaxDistance = 50f;
         private float _p1TargetScale = 0.5f;
+        private float _webStartHeightOffset = 1.0f; // height of WebStartPoint above InputTransform
 
         // Input edge detection
         private bool _shootHeldPrev;
@@ -1004,7 +1187,7 @@ namespace AWJSplitScreen
         private float _nextDebugLog;
         private int _driveCallCount;
 
-        public void Init(Component p1WebController, Camera p2Camera, Transform p2InputTransform, GameObject p2Spider, MelonLogger.Instance logger)
+        public void Init(Component p1WebController, Camera p2Camera, Transform p2InputTransform, GameObject p2Spider, MelonLogger.Instance logger, Transform p1InputTransform = null)
         {
             _logger = logger;
             if (_logger != null) _logger.Msg("[P2WebManager] Init begin");
@@ -1030,6 +1213,10 @@ namespace AWJSplitScreen
                 _p2InputTransform = p2InputTransform;
                 _p2Rigidbody = p2Spider != null ? p2Spider.GetComponent<Rigidbody>() : null;
 
+                // Read P1's WebStartPoint height offset (isolated call to avoid MonoMod crash)
+                try { ReadWebStartPointOffset(p1WebController, p2InputTransform, p1InputTransform); }
+                catch (Exception ex) { logger.Msg("[P2WebManager] WebStartPoint offset read failed (using default " + _webStartHeightOffset + "): " + ex.Message); }
+
                 // Use P1-derived scale/offset if found
                 _p2DotScale = _p1TargetScale > 0.01f ? _p1TargetScale : _p2DotScale;
                 _grappleMaxDist = _p1MaxDistance > 0f ? _p1MaxDistance : _grappleMaxDist;
@@ -1043,7 +1230,8 @@ namespace AWJSplitScreen
                     " | CheckForWebTarget=" + (_mCheckForWebTarget != null) +
                     " | Rigidbody=" + (_p2Rigidbody != null) +
                     " | TargetDot=" + (_p2TargetDot != null) +
-                    " | P1MaxDist=" + _p1MaxDistance + " | P1Scale=" + _p1TargetScale + " | P2Offset=" + _p2NormalOffset);
+                    " | P1MaxDist=" + _p1MaxDistance + " | P1Scale=" + _p1TargetScale + " | P2Offset=" + _p2NormalOffset +
+                    " | WebStartHeight=" + _webStartHeightOffset.ToString("F2"));
             }
             finally
             {
@@ -1077,8 +1265,6 @@ namespace AWJSplitScreen
                 // Try to set _Color property directly for Standard shader
                 try { mat.SetColor("_Color", new Color(1f, 0f, 0f, 1f)); } catch { }
                 try { mat.SetColor("_EmissionColor", new Color(1f, 0f, 0f, 1f)); } catch { }
-<<<<<<< Updated upstream
-=======
 
                 // Force ZTest=Always and ZWrite Off so the dot draws over any occluding geometry
                 // (including P2's own body which sits between the camera and the target).
@@ -1086,8 +1272,6 @@ namespace AWJSplitScreen
                 try { mat.SetInt("_ZWrite", 0); } catch { }
                 // Render in a very late queue so it draws last, on top of everything
                 mat.renderQueue = 5000;
-
->>>>>>> Stashed changes
                 rend.material = mat;
                 rend.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
                 rend.receiveShadows = false;
@@ -1251,6 +1435,52 @@ namespace AWJSplitScreen
             }
         }
 
+        private void ReadWebStartPointOffset(Component p1WebController, Transform p2InputTransform, Transform p1InputTransform)
+        {
+            // Safely read just the WebStartPoint getter to find how high above InputTransform the web origin is.
+            // This is isolated from TryReadP1TargetParams which crashes on MonoMod.Backports.
+            var t = p1WebController.GetType();
+            var getter = t.GetMethod("get_WebStartPoint", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            if (getter == null)
+            {
+                if (_logger != null) _logger.Msg("[P2WebManager] WebStartPoint getter not found, using default offset " + _webStartHeightOffset);
+                return;
+            }
+
+            var val = getter.Invoke(p1WebController, null);
+            Vector3 wsPos = Vector3.zero;
+            bool found = false;
+
+            if (val is Transform tr && tr != null)
+            {
+                wsPos = tr.position;
+                found = true;
+                if (_logger != null) _logger.Msg("[P2WebManager] P1 WebStartPoint Transform: " + tr.name + " pos=" + wsPos);
+            }
+            else if (val is Vector3 v)
+            {
+                wsPos = v;
+                found = true;
+                if (_logger != null) _logger.Msg("[P2WebManager] P1 WebStartPoint Vector3: " + wsPos);
+            }
+
+            if (found)
+            {
+                // Calculate height difference between WebStartPoint and P1's InputTransform
+                var refPos = p1InputTransform != null ? p1InputTransform.position : p2InputTransform.position;
+                float heightDiff = wsPos.y - refPos.y;
+                if (heightDiff > 0.05f && heightDiff < 5f)
+                {
+                    _webStartHeightOffset = heightDiff;
+                    if (_logger != null) _logger.Msg("[P2WebManager] WebStartPoint height offset: " + _webStartHeightOffset.ToString("F3"));
+                }
+                else
+                {
+                    if (_logger != null) _logger.Msg("[P2WebManager] WebStartPoint height " + heightDiff.ToString("F3") + " out of range, using default " + _webStartHeightOffset);
+                }
+            }
+        }
+
         private void CacheWebControllerMethods()
         {
             try
@@ -1394,8 +1624,11 @@ namespace AWJSplitScreen
         {
             if (_p2TargetDot == null || _p2Camera == null) return;
 
-            // Always raycast from P2's camera and show the dot where P2 is looking
-            var ray = BuildP2Ray();
+            // P1's dot always appears at screen center.
+            // Cast directly from camera in camera.forward direction.
+            // P2's spider is on layer 2 (Ignore Raycast) so the ray passes through it.
+            // The dot material has ZTest=Always so it renders on top of everything.
+            var ray = new Ray(_p2Camera.transform.position, _p2Camera.transform.forward);
             RaycastHit hit;
 
             if (Physics.Raycast(ray, out hit, _grappleMaxDist))
@@ -1405,7 +1638,6 @@ namespace AWJSplitScreen
             }
             else
             {
-                // Nothing in range — hide dot
                 _p2TargetDot.SetActive(false);
             }
         }
@@ -1472,14 +1704,22 @@ namespace AWJSplitScreen
 
         private Ray BuildP2Ray()
         {
-            // Start slightly in front of the camera to avoid P2's own body occluding the dot
-            float offset = 0.5f;
-            if (_p2Camera != null)
-                offset = Mathf.Max(0.2f, _p2Camera.nearClipPlane + 0.1f);
+            // Compute aim direction from spider's web start point toward the camera's
+            // screen-center projected at far distance. This corrects the parallax:
+            // camera.forward points steeply down (camera is above spider), but the
+            // direction from spider toward the far aim point is more horizontal.
+            var spiderPos = _p2InputTransform != null ? _p2InputTransform.position : _p2Camera.transform.position;
+            var webStart = spiderPos + Vector3.up * _webStartHeightOffset;
 
-            var origin = _p2Camera.transform.position + _p2Camera.transform.forward * offset;
-            var dir = _p2Camera.transform.forward;
-            return new Ray(origin, dir);
+            // Project screen center to world at a far reference distance
+            var aimPoint = _p2Camera.ViewportToWorldPoint(new Vector3(0.5f, 0.5f, _grappleMaxDist));
+            var dir = (aimPoint - webStart).normalized;
+
+            // Sanity: if direction is somehow zero (shouldn't happen), fall back to camera forward
+            if (dir.sqrMagnitude < 0.001f)
+                dir = _p2Camera.transform.forward;
+
+            return new Ray(webStart, dir);
         }
 
         private void UpdateGrappleLine()
