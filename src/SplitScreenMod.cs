@@ -1281,19 +1281,87 @@ namespace AWJSplitScreen
             _logger.Msg("[P2WebManager] Created target dot sphere.");
         }
 
+        private bool _webLineMatCached;
+
         private void CreateGrappleLine(GameObject p2Spider)
         {
             var lineGo = new GameObject("P2_GrappleLine");
             lineGo.transform.SetParent(p2Spider.transform, false);
             _grappleLine = lineGo.AddComponent<LineRenderer>();
-            _grappleLine.positionCount = 2;
-            _grappleLine.startWidth = 0.08f;
-            _grappleLine.endWidth = 0.08f;
+            _grappleLine.useWorldSpace = true;
+            _grappleLine.positionCount = 10;
+            _grappleLine.startWidth = 0.15f;
+            _grappleLine.endWidth = 0.15f;
 
-            var lineMat = new Material(Shader.Find("Sprites/Default") ?? Shader.Find("Unlit/Color") ?? Shader.Find("Standard"));
-            lineMat.color = new Color(0.9f, 0.9f, 1f, 0.8f);
-            _grappleLine.material = lineMat;
+            // Try to copy P1's web line material/settings from existing WebThread LineRenderers
+            TryCopyWebLineMaterial();
+
+            // Fallback if no web material found yet
+            if (!_webLineMatCached)
+            {
+                var lineMat = new Material(Shader.Find("Sprites/Default") ?? Shader.Find("Unlit/Color") ?? Shader.Find("Standard"));
+                lineMat.color = new Color(0.9f, 0.9f, 1f, 0.8f);
+                _grappleLine.material = lineMat;
+            }
             _grappleLine.enabled = false;
+        }
+
+        private void TryCopyWebLineMaterial()
+        {
+            if (_grappleLine == null) return;
+            try
+            {
+                // Search for any LineRenderer that belongs to a WebThread in the scene
+                var allRenderers = UnityEngine.Object.FindObjectsOfType<LineRenderer>(true);
+                LineRenderer bestLR = null;
+                for (int i = 0; i < allRenderers.Length; i++)
+                {
+                    var lr = allRenderers[i];
+                    if (lr == _grappleLine) continue;
+                    // Check if parent/self has a component with "WebThread" in its type name
+                    var comps = lr.GetComponents<Component>();
+                    bool isWebThread = false;
+                    for (int c = 0; c < comps.Length; c++)
+                    {
+                        if (comps[c] != null && comps[c].GetType().Name.Contains("WebThread"))
+                        {
+                            isWebThread = true;
+                            break;
+                        }
+                    }
+                    if (isWebThread && lr.material != null)
+                    {
+                        bestLR = lr;
+                        break;
+                    }
+                }
+
+                if (bestLR != null)
+                {
+                    _grappleLine.material = new Material(bestLR.material);
+                    _grappleLine.startWidth = bestLR.startWidth;
+                    _grappleLine.endWidth = bestLR.endWidth;
+                    _grappleLine.widthMultiplier = bestLR.widthMultiplier;
+                    _grappleLine.colorGradient = bestLR.colorGradient;
+                    _grappleLine.textureMode = bestLR.textureMode;
+                    _grappleLine.numCapVertices = bestLR.numCapVertices;
+                    _grappleLine.numCornerVertices = bestLR.numCornerVertices;
+                    _webLineMatCached = true;
+                    if (_logger != null)
+                        _logger.Msg("[P2WebManager] Copied web line material from: " + bestLR.gameObject.name
+                            + " width=" + bestLR.startWidth.ToString("F3") + " mat=" + bestLR.material.name);
+                }
+                else
+                {
+                    if (_logger != null)
+                        _logger.Msg("[P2WebManager] No WebThread LineRenderer found yet for material copy.");
+                }
+            }
+            catch (Exception ex)
+            {
+                if (_logger != null)
+                    _logger.Warning("[P2WebManager] TryCopyWebLineMaterial failed: " + ex.Message);
+            }
         }
 
         private void TryReadP1TargetParams(Component wc)
@@ -1661,6 +1729,10 @@ namespace AWJSplitScreen
                 return;
             }
 
+            // Lazy retry: if we didn't find a web material at init, try again now
+            if (!_webLineMatCached)
+                TryCopyWebLineMaterial();
+
             _grapplePoint = hit.point;
             _grappleActive = true;
 
@@ -1670,8 +1742,20 @@ namespace AWJSplitScreen
 
             _grappleJoint = _p2Rigidbody.gameObject.AddComponent<SpringJoint>();
             _grappleJoint.autoConfigureConnectedAnchor = false;
-            _grappleJoint.connectedAnchor = _grapplePoint;
             _grappleJoint.anchor = Vector3.zero;
+
+            // If the hit object has a Rigidbody, connect to it (enables two-way pull / tugging physics objects)
+            var hitRb = hit.collider != null ? hit.collider.attachedRigidbody : null;
+            if (hitRb != null)
+            {
+                _grappleJoint.connectedBody = hitRb;
+                // Convert hit point to the target's local space for the connected anchor
+                _grappleJoint.connectedAnchor = hitRb.transform.InverseTransformPoint(_grapplePoint);
+            }
+            else
+            {
+                _grappleJoint.connectedAnchor = _grapplePoint;
+            }
 
             float dist = Vector3.Distance(_p2Rigidbody.position, _grapplePoint);
             _grappleJoint.maxDistance = dist * 0.8f;
@@ -1686,6 +1770,7 @@ namespace AWJSplitScreen
                     " dist=" + dist.ToString("F1") +
                     " rbPos=" + _p2Rigidbody.position +
                     " rbGO=" + _p2Rigidbody.gameObject.name +
+                    " hitRb=" + (hitRb != null ? hitRb.gameObject.name : "null") +
                     " joint=" + (_grappleJoint != null));
         }
 
@@ -1704,22 +1789,9 @@ namespace AWJSplitScreen
 
         private Ray BuildP2Ray()
         {
-            // Compute aim direction from spider's web start point toward the camera's
-            // screen-center projected at far distance. This corrects the parallax:
-            // camera.forward points steeply down (camera is above spider), but the
-            // direction from spider toward the far aim point is more horizontal.
-            var spiderPos = _p2InputTransform != null ? _p2InputTransform.position : _p2Camera.transform.position;
-            var webStart = spiderPos + Vector3.up * _webStartHeightOffset;
-
-            // Project screen center to world at a far reference distance
-            var aimPoint = _p2Camera.ViewportToWorldPoint(new Vector3(0.5f, 0.5f, _grappleMaxDist));
-            var dir = (aimPoint - webStart).normalized;
-
-            // Sanity: if direction is somehow zero (shouldn't happen), fall back to camera forward
-            if (dir.sqrMagnitude < 0.001f)
-                dir = _p2Camera.transform.forward;
-
-            return new Ray(webStart, dir);
+            // Use the same camera-center ray as the target dot so the grapple fires
+            // exactly where the dot is pointing. This ensures visual consistency.
+            return new Ray(_p2Camera.transform.position, _p2Camera.transform.forward);
         }
 
         private void UpdateGrappleLine()
@@ -1733,8 +1805,35 @@ namespace AWJSplitScreen
             }
 
             _grappleLine.enabled = true;
-            _grappleLine.SetPosition(0, _p2Rigidbody.position);
-            _grappleLine.SetPosition(1, _grapplePoint);
+
+            // Start from P2's body (InputTransform), not rigidbody center
+            var startPos = _p2InputTransform != null
+                ? _p2InputTransform.position + Vector3.up * _webStartHeightOffset
+                : _p2Rigidbody.position;
+
+            // End at connected body (tracks moving targets) or fixed point
+            Vector3 endPos;
+            if (_grappleJoint != null && _grappleJoint.connectedBody != null)
+                endPos = _grappleJoint.connectedBody.transform.TransformPoint(_grappleJoint.connectedAnchor);
+            else
+                endPos = _grapplePoint;
+
+            // Interpolate with a slight catenary sag for natural web look
+            int count = _grappleLine.positionCount;
+            float totalDist = Vector3.Distance(startPos, endPos);
+            float sagAmount = totalDist * 0.04f; // subtle droop
+            float time = Time.time;
+            for (int i = 0; i < count; i++)
+            {
+                float t = (float)i / (count - 1);
+                var pos = Vector3.Lerp(startPos, endPos, t);
+                // Catenary sag (parabola: max at center, zero at ends)
+                float sag = sagAmount * (4f * t * (1f - t));
+                // Subtle wave animation
+                float wave = Mathf.Sin(time * 3f + t * 6f) * sagAmount * 0.3f;
+                pos.y -= sag + wave;
+                _grappleLine.SetPosition(i, pos);
+            }
         }
 
         public void Cleanup()
