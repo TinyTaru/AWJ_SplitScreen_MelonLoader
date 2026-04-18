@@ -1,10 +1,10 @@
 # AWJ Split Screen + P2 Inject (v0.2.2)
 
-##Important Hotkeys:
+## Important Hotkeys:
 F9  - Toggle multiplayer.
 F10 - Flip between horizontal and vertical.
 
-###Player 2 controller mapping:
+### Player 2 controller mapping:
 - Move: Left Stick
 - Look: Right Stick
 - Shoot: Right Trigger
@@ -25,7 +25,7 @@ Install:
 Use Melon Loader 7.2. Install Melon Loader here: https://melonloader.co/download.html. Note that Melon Loader's website currently only shows 7.0. The 7.0 installer will update once opened.
 Build Release; copy `bin\Release\net472\AWJ_SplitScreen.dll` into `<GameFolder>\Mods\` (overwrite old).
 
-##Player 2 progress:
+## Player 2 progress:
 Legend
 🟩 = Works on player 2.
 🟨 = Partially works on player 2. Likely buggy
