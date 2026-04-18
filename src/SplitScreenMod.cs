@@ -6,13 +6,15 @@ using System.Collections.Generic;
 using System.Reflection;
 using HarmonyLib;
 
-[assembly: MelonInfo(typeof(AWJSplitScreen.SplitScreenMod), "AWJ Split Screen + P2 Inject", "0.2.2", "ChatGPT")]
-[assembly: MelonGame(null, "A Webbing Journey")]
+[assembly: MelonInfo(typeof(AWJSplitScreen.SplitScreenMod), "AWJ Split Screen", "0.2.4", "TinyTaru", "https://github.com")]
+[assembly: MelonGame("Fire Totem Games", "A Webbing Journey")]
 
 namespace AWJSplitScreen
 {
     public sealed class SplitScreenMod : MelonMod
     {
+        internal static bool SkipCallbackContextPatches;
+
         // Shared config/state for patches
         internal static bool P2UseGamepad = true;
         internal static int P2GamepadIndex = 1;        // second controller
@@ -130,6 +132,9 @@ namespace AWJSplitScreen
         private void InstallHarmonyPatches()
         {
             var h = new HarmonyLib.Harmony("AWJ.SplitScreen.P2Inject.v022");
+            SkipCallbackContextPatches = IsIl2CppRuntime();
+            if (SkipCallbackContextPatches)
+                LoggerInstance.Warning("Detected IL2CPP runtime. CallbackContext patches are disabled for stability.");
 
             // BodyMovement patches
             try
@@ -163,22 +168,27 @@ namespace AWJSplitScreen
                         h.Patch(npcWalk,
                             postfix: new HarmonyMethod(typeof(BodyMovementPatches), nameof(BodyMovementPatches.NpcWalk_Postfix)));
 
-                    var bms = bodyMoveType.GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-                    for (int i = 0; i < bms.Length; i++)
+                    int callbackCount = 0;
+                    if (!SkipCallbackContextPatches)
                     {
-                        var m = bms[i];
-                        var ps = m.GetParameters();
-                        if (ps.Length != 1) continue;
-                        var pt = ps[0].ParameterType;
-                        var pname = pt != null ? pt.Name : "";
-                        if (string.Equals(pname, "CallbackContext", StringComparison.Ordinal) ||
-                            (pt != null && pt.FullName != null && pt.FullName.IndexOf("CallbackContext", StringComparison.OrdinalIgnoreCase) >= 0))
+                        var bms = bodyMoveType.GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                        for (int i = 0; i < bms.Length; i++)
                         {
-                            h.Patch(m, prefix: new HarmonyMethod(typeof(BodyMovementPatches), nameof(BodyMovementPatches.CallbackContextFilter_Prefix)));
+                            var m = bms[i];
+                            var ps = m.GetParameters();
+                            if (ps.Length != 1) continue;
+                            var pt = ps[0].ParameterType;
+                            var pname = pt != null ? pt.Name : "";
+                            if (string.Equals(pname, "CallbackContext", StringComparison.Ordinal) ||
+                                (pt != null && pt.FullName != null && pt.FullName.IndexOf("CallbackContext", StringComparison.OrdinalIgnoreCase) >= 0))
+                            {
+                                h.Patch(m, prefix: new HarmonyMethod(typeof(BodyMovementPatches), nameof(BodyMovementPatches.CallbackContextFilter_Prefix)));
+                                callbackCount++;
+                            }
                         }
                     }
 
-                    LoggerInstance.Msg("Patched BodyMovement: FixedUpdate + NpcWalk + CallbackContext filter.");
+                    LoggerInstance.Msg("Patched BodyMovement: FixedUpdate + NpcWalk + CallbackContext filters=" + callbackCount + ".");
                     LoggerInstance.Msg("BodyMovement moveVector field: " + (BodyMove_MoveVectorField != null ? BodyMove_MoveVectorField.Name : "null"));
                 }
             }
@@ -251,20 +261,23 @@ namespace AWJSplitScreen
                         h.Patch(getDir, prefix: new HarmonyMethod(typeof(WebControllerPatches), nameof(WebControllerPatches.WebDirectionVector3_Prefix)));
 
                     int callbackCount = 0;
-                    var wms = webType.GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-                    for (int i = 0; i < wms.Length; i++)
+                    if (!SkipCallbackContextPatches)
                     {
-                        var m = wms[i];
-                        var ps = m.GetParameters();
-                        if (ps.Length != 1) continue;
-
-                        var pt = ps[0].ParameterType;
-                        var pname = pt != null ? pt.Name : "";
-                        if (string.Equals(pname, "CallbackContext", StringComparison.Ordinal) ||
-                            (pt != null && pt.FullName != null && pt.FullName.IndexOf("CallbackContext", StringComparison.OrdinalIgnoreCase) >= 0))
+                        var wms = webType.GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                        for (int i = 0; i < wms.Length; i++)
                         {
-                            h.Patch(m, prefix: new HarmonyMethod(typeof(WebControllerPatches), nameof(WebControllerPatches.CallbackContextFilter_Prefix)));
-                            callbackCount++;
+                            var m = wms[i];
+                            var ps = m.GetParameters();
+                            if (ps.Length != 1) continue;
+
+                            var pt = ps[0].ParameterType;
+                            var pname = pt != null ? pt.Name : "";
+                            if (string.Equals(pname, "CallbackContext", StringComparison.Ordinal) ||
+                                (pt != null && pt.FullName != null && pt.FullName.IndexOf("CallbackContext", StringComparison.OrdinalIgnoreCase) >= 0))
+                            {
+                                h.Patch(m, prefix: new HarmonyMethod(typeof(WebControllerPatches), nameof(WebControllerPatches.CallbackContextFilter_Prefix)));
+                                callbackCount++;
+                            }
                         }
                     }
 
@@ -304,31 +317,28 @@ namespace AWJSplitScreen
                     if (getter != null)
                         h.Patch(getter, prefix: new HarmonyMethod(typeof(CameraControllerPatches), nameof(CameraControllerPatches.InputTransform_Prefix)));
 
-                    var cms = camType.GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-                    for (int i = 0; i < cms.Length; i++)
+                    int callbackCount = 0;
+                    if (!SkipCallbackContextPatches)
                     {
-                        var m = cms[i];
-                        var ps = m.GetParameters();
-                        bool hasCallbackContext = false;
-                        for (int p = 0; p < ps.Length; p++)
+                        var cms = camType.GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                        for (int i = 0; i < cms.Length; i++)
                         {
-                            var pt = ps[p].ParameterType;
+                            var m = cms[i];
+                            var ps = m.GetParameters();
+                            if (ps.Length != 1) continue;
+
+                            var pt = ps[0].ParameterType;
                             var pname = pt != null ? pt.Name : "";
                             if (string.Equals(pname, "CallbackContext", StringComparison.Ordinal) ||
                                 (pt != null && pt.FullName != null && pt.FullName.IndexOf("CallbackContext", StringComparison.OrdinalIgnoreCase) >= 0))
                             {
-                                hasCallbackContext = true;
-                                break;
+                                h.Patch(m, prefix: new HarmonyMethod(typeof(CameraControllerPatches), nameof(CameraControllerPatches.CallbackContextFilter_Prefix)));
+                                callbackCount++;
                             }
-                        }
-
-                        if (hasCallbackContext)
-                        {
-                            h.Patch(m, prefix: new HarmonyMethod(typeof(CameraControllerPatches), nameof(CameraControllerPatches.CallbackContextFilter_Prefix)));
                         }
                     }
 
-                    LoggerInstance.Msg("Patched CameraController.InputTransform + CallbackContext filter for P2.");
+                    LoggerInstance.Msg("Patched CameraController.InputTransform + CallbackContext filters=" + callbackCount + " for P2.");
                 }
             }
             catch (Exception ex)
@@ -345,8 +355,15 @@ namespace AWJSplitScreen
                     var onLook = AccessTools.Method(mouseLookType, "OnLook");
                     if (onLook != null)
                     {
-                        h.Patch(onLook, prefix: new HarmonyMethod(typeof(CameraMouseLookPatches), nameof(CameraMouseLookPatches.OnLook_Prefix)));
-                        LoggerInstance.Msg("Patched CameraMouseLook.OnLook to block P2 gamepad input.");
+                        if (!SkipCallbackContextPatches)
+                        {
+                            h.Patch(onLook, prefix: new HarmonyMethod(typeof(CameraMouseLookPatches), nameof(CameraMouseLookPatches.OnLook_Prefix)));
+                            LoggerInstance.Msg("Patched CameraMouseLook.OnLook to block P2 gamepad input.");
+                        }
+                        else
+                        {
+                            LoggerInstance.Warning("Skipped CameraMouseLook.OnLook patch due to IL2CPP callback compatibility mode.");
+                        }
                     }
                     else
                     {
@@ -383,6 +400,26 @@ namespace AWJSplitScreen
         {
             try { return t.GetField(name, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic); }
             catch { return null; }
+        }
+
+        private static bool IsIl2CppRuntime()
+        {
+            try
+            {
+                var direct = Type.GetType("Il2CppInterop.Runtime.Il2CppClassPointerStore`1, Il2CppInterop.Runtime", false);
+                if (direct != null) return true;
+
+                var loaded = AppDomain.CurrentDomain.GetAssemblies();
+                for (int i = 0; i < loaded.Length; i++)
+                {
+                    var n = loaded[i].GetName().Name;
+                    if (string.IsNullOrEmpty(n)) continue;
+                    if (n.IndexOf("Il2Cpp", StringComparison.OrdinalIgnoreCase) >= 0) return true;
+                }
+            }
+            catch { }
+
+            return false;
         }
 
         private static FieldInfo FindBestMoveInputField(Type bodyMoveType)
@@ -1167,6 +1204,7 @@ namespace AWJSplitScreen
         // P2 grapple state
         private SpringJoint _grappleJoint;
         private LineRenderer _grappleLine;
+        private LineRenderer _shootLine;   // preview line while shoot button held (mirrors P1's IndicateWeb)
         private Vector3 _grapplePoint;
         private bool _grappleActive;
         private float _grappleMaxDist = 50f;
@@ -1289,7 +1327,7 @@ namespace AWJSplitScreen
             lineGo.transform.SetParent(p2Spider.transform, false);
             _grappleLine = lineGo.AddComponent<LineRenderer>();
             _grappleLine.useWorldSpace = true;
-            _grappleLine.positionCount = 10;
+            _grappleLine.positionCount = 2;
             _grappleLine.startWidth = 0.15f;
             _grappleLine.endWidth = 0.15f;
 
@@ -1304,6 +1342,20 @@ namespace AWJSplitScreen
                 _grappleLine.material = lineMat;
             }
             _grappleLine.enabled = false;
+
+            // Shoot preview line — visible while holding the shoot button, mimics P1's IndicateWeb animation
+            var shootLineGo = new GameObject("P2_ShootLine");
+            shootLineGo.transform.SetParent(p2Spider.transform, false);
+            _shootLine = shootLineGo.AddComponent<LineRenderer>();
+            _shootLine.useWorldSpace = true;
+            _shootLine.positionCount = 2;
+            _shootLine.startWidth = 0.15f;
+            _shootLine.endWidth = 0.05f;   // taper toward tip for a "shooting" look
+            _shootLine.enabled = false;
+
+            // Share the fallback material with the shoot line if web material wasn't found yet
+            if (!_webLineMatCached && _grappleLine.material != null)
+                _shootLine.material = new Material(_grappleLine.material);
         }
 
         private void TryCopyWebLineMaterial()
@@ -1318,6 +1370,7 @@ namespace AWJSplitScreen
                 {
                     var lr = allRenderers[i];
                     if (lr == _grappleLine) continue;
+                    if (lr == _shootLine) continue;
                     // Check if parent/self has a component with "WebThread" in its type name
                     var comps = lr.GetComponents<Component>();
                     bool isWebThread = false;
@@ -1346,6 +1399,20 @@ namespace AWJSplitScreen
                     _grappleLine.textureMode = bestLR.textureMode;
                     _grappleLine.numCapVertices = bestLR.numCapVertices;
                     _grappleLine.numCornerVertices = bestLR.numCornerVertices;
+
+                    // Apply the same material/settings to the shoot preview line
+                    if (_shootLine != null)
+                    {
+                        _shootLine.material = new Material(bestLR.material);
+                        _shootLine.startWidth = bestLR.startWidth;
+                        _shootLine.endWidth = bestLR.endWidth * 0.35f; // taper to tip
+                        _shootLine.widthMultiplier = bestLR.widthMultiplier;
+                        _shootLine.colorGradient = bestLR.colorGradient;
+                        _shootLine.textureMode = bestLR.textureMode;
+                        _shootLine.numCapVertices = bestLR.numCapVertices;
+                        _shootLine.numCornerVertices = bestLR.numCornerVertices;
+                    }
+
                     _webLineMatCached = true;
                     if (_logger != null)
                         _logger.Msg("[P2WebManager] Copied web line material from: " + bestLR.gameObject.name
@@ -1676,6 +1743,9 @@ namespace AWJSplitScreen
                     StopGrapple();
                 }
 
+                // Update shoot preview line (visible while holding shoot, like P1's IndicateWeb)
+                UpdateShootLine(shootHeld);
+
                 // Update grapple line visual
                 UpdateGrappleLine();
             }
@@ -1686,6 +1756,38 @@ namespace AWJSplitScreen
                 if (_logger != null)
                     _logger.Warning("[P2WebManager] DriveInput error: " + ex);
             }
+        }
+
+        private void UpdateShootLine(bool shootHeld)
+        {
+            if (_shootLine == null) return;
+
+            // Lazy material copy — web materials may not exist at init time
+            if (!_webLineMatCached)
+                TryCopyWebLineMaterial();
+
+            if (!shootHeld || _p2Camera == null)
+            {
+                _shootLine.enabled = false;
+                return;
+            }
+
+            var startPos = _p2InputTransform != null
+                ? _p2InputTransform.position + Vector3.up * _webStartHeightOffset
+                : (_p2Rigidbody != null ? _p2Rigidbody.position : _p2Camera.transform.position);
+
+            // Ray from camera center — same origin as target dot, so line always ends exactly on the dot
+            var ray = new Ray(_p2Camera.transform.position, _p2Camera.transform.forward);
+            RaycastHit hit;
+            Vector3 endPos;
+            if (Physics.Raycast(ray, out hit, _grappleMaxDist))
+                endPos = hit.point;
+            else
+                endPos = _p2Camera.transform.position + _p2Camera.transform.forward * _grappleMaxDist;
+
+            _shootLine.SetPosition(0, startPos);
+            _shootLine.SetPosition(1, endPos);
+            _shootLine.enabled = true;
         }
 
         private void UpdateTargetDot(bool show)
@@ -1818,22 +1920,9 @@ namespace AWJSplitScreen
             else
                 endPos = _grapplePoint;
 
-            // Interpolate with a slight catenary sag for natural web look
-            int count = _grappleLine.positionCount;
-            float totalDist = Vector3.Distance(startPos, endPos);
-            float sagAmount = totalDist * 0.04f; // subtle droop
-            float time = Time.time;
-            for (int i = 0; i < count; i++)
-            {
-                float t = (float)i / (count - 1);
-                var pos = Vector3.Lerp(startPos, endPos, t);
-                // Catenary sag (parabola: max at center, zero at ends)
-                float sag = sagAmount * (4f * t * (1f - t));
-                // Subtle wave animation
-                float wave = Mathf.Sin(time * 3f + t * 6f) * sagAmount * 0.3f;
-                pos.y -= sag + wave;
-                _grappleLine.SetPosition(i, pos);
-            }
+            // Straight line between start and end — matches P1's web visual
+            _grappleLine.SetPosition(0, startPos);
+            _grappleLine.SetPosition(1, endPos);
         }
 
         public void Cleanup()
@@ -1849,6 +1938,11 @@ namespace AWJSplitScreen
             {
                 UnityEngine.Object.Destroy(_grappleLine.gameObject);
                 _grappleLine = null;
+            }
+            if (_shootLine != null)
+            {
+                UnityEngine.Object.Destroy(_shootLine.gameObject);
+                _shootLine = null;
             }
             _p1WebController = null;
             _p2Camera = null;
@@ -2220,7 +2314,7 @@ namespace AWJSplitScreen
             if (!SplitScreenMod.FilterP1FromP2Gamepad) return true;
             if (!SplitScreenMod.P2UseGamepad) return true;
 
-            if (InputCompat.IsCallbackContextFromP2Gamepad(__0, SplitScreenMod.P2GamepadIndex))
+            if (InputCompat.IsP2LookActiveNow(SplitScreenMod.P2GamepadIndex, SplitScreenMod.P2Deadzone))
             {
                 if (SplitScreenMod.DebugCameraInput)
                     MelonLogger.Msg("[CameraMouseLook] Blocked P2 gamepad OnLook.");
@@ -2477,7 +2571,7 @@ namespace AWJSplitScreen
             return false;
         }
 
-        public static bool CallbackContextFilter_Prefix(object __instance, object __0)
+        public static bool CallbackContextFilter_Prefix(object __instance, ref UnityEngine.InputSystem.InputAction.CallbackContext __0)
         {
             if (!SplitScreenMod.FilterP1FromP2Gamepad) return true;
             if (!SplitScreenMod.P2UseGamepad) return true;
@@ -2665,7 +2759,7 @@ namespace AWJSplitScreen
 
         private static float _nextFilterLog;
 
-        public static bool CallbackContextFilter_Prefix(object __instance, object __0)
+        public static bool CallbackContextFilter_Prefix(object __instance, ref UnityEngine.InputSystem.InputAction.CallbackContext __0)
         {
             if (!SplitScreenMod.FilterP1FromP2Gamepad) return true;
             if (!SplitScreenMod.P2UseGamepad) return true;
@@ -2736,29 +2830,18 @@ namespace AWJSplitScreen
         private static int _pollingBlockedP2;
         private static int _nonControllerPathSuspicions;
 
-        public static bool CallbackContextFilter_Prefix(object[] __args)
+        public static bool CallbackContextFilter_Prefix(ref UnityEngine.InputSystem.InputAction.CallbackContext __0)
         {
             if (!SplitScreenMod.FilterP1FromP2Gamepad) return true;
             if (!SplitScreenMod.P2UseGamepad) return true;
 
-            var args = __args;
-            bool sawAnyCallbackArg = false;
-            if (args != null)
-            {
-                for (int i = 0; i < args.Length; i++)
-                {
-                    if (InputCompat.IsAnyCallbackContextArg(args[i]))
-                    {
-                        sawAnyCallbackArg = true;
-                        _callbackHits++;
-                    }
+            bool sawAnyCallbackArg = true;
+            _callbackHits++;
 
-                    if (InputCompat.IsCallbackContextFromP2Gamepad(args[i], SplitScreenMod.P2GamepadIndex))
-                    {
-                        _callbackBlockedP2++;
-                        return false;
-                    }
-                }
+            if (InputCompat.IsCallbackContextFromP2Gamepad(__0, SplitScreenMod.P2GamepadIndex))
+            {
+                _callbackBlockedP2++;
+                return false;
             }
 
             if (InputCompat.IsP2LookActiveNow(SplitScreenMod.P2GamepadIndex, SplitScreenMod.P2Deadzone))

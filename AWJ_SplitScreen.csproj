@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <TargetFramework>net472</TargetFramework>
-    <LangVersion>latest</LangVersion>
+    <LangVersion>7.3</LangVersion>
     <Nullable>disable</Nullable>
     <ImplicitUsings>disable</ImplicitUsings>
     <Deterministic>true</Deterministic>
@@ -40,6 +40,10 @@
     </Reference>
     <Reference Include="UnityEngine.AudioModule" Condition="Exists('$(GameManagedPath)\UnityEngine.AudioModule.dll')">
       <HintPath>$(GameManagedPath)\UnityEngine.AudioModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Unity.InputSystem" Condition="Exists('$(GameManagedPath)\Unity.InputSystem.dll')">
+      <HintPath>$(GameManagedPath)\Unity.InputSystem.dll</HintPath>
       <Private>false</Private>
     </Reference>
   </ItemGroup>
