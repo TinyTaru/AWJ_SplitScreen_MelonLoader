@@ -63,6 +63,8 @@ namespace AWJSplitScreen
         private const KeyCode P2AttachKeyFallback = KeyCode.P;
         private const string P2ReleaseKeyProp = "rightCtrlKey";
         private const KeyCode P2ReleaseKeyFallback = KeyCode.RightControl;
+        private const string P2InteractKeyProp = "hKey";
+        private const KeyCode P2InteractKeyFallback = KeyCode.H;
 
         private Camera _camLeftOrTop;
         private Camera _camRightOrBottom;
@@ -83,6 +85,8 @@ namespace AWJSplitScreen
 
         private Component _webController;
         private P2WebManager _p2WebManager;
+        private Component _p2SpiderInteraction;
+        private MethodInfo _p2SpiderMobileInteractMethod;
 
         public override void OnInitializeMelon()
         {
@@ -110,7 +114,7 @@ namespace AWJSplitScreen
             SceneManager.sceneLoaded += (_, __) => MelonCoroutines.Start(DeferredSetup());
 
             LoggerInstance.Msg("AWJ Split Screen + P2 Inject v0.2.2 loaded.");
-            LoggerInstance.Msg("F9 split, F10 orientation | P2 Move: IJKL or Gamepad LStick | P2 Look: N/M or RStickX | P2 Jump: A | P2 Web: U/RT shoot, P/LT attach, O/B delete, RightCtrl/RB release.");
+            LoggerInstance.Msg("F9 split, F10 orientation | P2 Move: IJKL or Gamepad LStick | P2 Look: N/M or RStickX | P2 Jump: A | P2 Interact: H/X | P2 Web: U/RT shoot, P/LT attach, O/B delete, RightCtrl/RB release.");
             LoggerInstance.Msg("Tip: If both controllers still move P1, ensure FilterP1FromP2Gamepad=true and P2_GamepadIndex is the second pad (usually 1).");
         }
 
@@ -195,6 +199,52 @@ namespace AWJSplitScreen
             catch (Exception ex)
             {
                 LoggerInstance.Warning("BodyMovement patch block failed (non-fatal): " + ex);
+            }
+
+            // SpiderInteraction patches (P2 interaction/collectible support while keeping isPlayer=false globally)
+            try
+            {
+                var spiderInteractionType = AccessTools.TypeByName("_Scripts.Spider.SpiderInteraction");
+                if (spiderInteractionType != null)
+                {
+                    var start = AccessTools.Method(spiderInteractionType, "Start");
+                    if (start != null)
+                        h.Patch(start,
+                            prefix: new HarmonyMethod(typeof(SpiderInteractionPatches), nameof(SpiderInteractionPatches.TemporarilyEnableIsPlayer_Prefix)),
+                            postfix: new HarmonyMethod(typeof(SpiderInteractionPatches), nameof(SpiderInteractionPatches.TemporarilyEnableIsPlayer_Postfix)));
+
+                    var onTriggerEnter = spiderInteractionType.GetMethod("OnTriggerEnter",
+                        BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public,
+                        null,
+                        new Type[] { typeof(Collider) },
+                        null);
+                    if (onTriggerEnter != null)
+                        h.Patch(onTriggerEnter,
+                            prefix: new HarmonyMethod(typeof(SpiderInteractionPatches), nameof(SpiderInteractionPatches.TemporarilyEnableIsPlayer_Prefix)),
+                            postfix: new HarmonyMethod(typeof(SpiderInteractionPatches), nameof(SpiderInteractionPatches.TemporarilyEnableIsPlayer_Postfix)));
+
+                    var onTriggerExit = spiderInteractionType.GetMethod("OnTriggerExit",
+                        BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public,
+                        null,
+                        new Type[] { typeof(Collider) },
+                        null);
+                    if (onTriggerExit != null)
+                        h.Patch(onTriggerExit,
+                            prefix: new HarmonyMethod(typeof(SpiderInteractionPatches), nameof(SpiderInteractionPatches.TemporarilyEnableIsPlayer_Prefix)),
+                            postfix: new HarmonyMethod(typeof(SpiderInteractionPatches), nameof(SpiderInteractionPatches.TemporarilyEnableIsPlayer_Postfix)));
+
+                    var mobileInteract = AccessTools.Method(spiderInteractionType, "MobileInteract");
+                    if (mobileInteract != null)
+                        h.Patch(mobileInteract,
+                            prefix: new HarmonyMethod(typeof(SpiderInteractionPatches), nameof(SpiderInteractionPatches.TemporarilyEnableIsPlayer_Prefix)),
+                            postfix: new HarmonyMethod(typeof(SpiderInteractionPatches), nameof(SpiderInteractionPatches.TemporarilyEnableIsPlayer_Postfix)));
+
+                    LoggerInstance.Msg("Patched SpiderInteraction: Start + TriggerEnter/Exit + MobileInteract for P2.");
+                }
+            }
+            catch (Exception ex)
+            {
+                LoggerInstance.Warning("SpiderInteraction patch block failed (non-fatal): " + ex);
             }
 
             // LegController patches
@@ -493,6 +543,9 @@ namespace AWJSplitScreen
             {
                 if (InputCompat.IsP2JumpPressedNow(P2UseGamepad, P2GamepadIndex))
                     P2JumpPressed = true;
+
+                if (InputCompat.IsP2InteractPressedNow(P2UseGamepad, P2GamepadIndex, P2InteractKeyProp, P2InteractKeyFallback))
+                    TriggerP2Interact();
 
                 // Drive P2's independent web system
                 if (_p2WebManager != null)
@@ -855,9 +908,56 @@ namespace AWJSplitScreen
                 LoggerInstance.Warning("P2WebManager setup failed (non-fatal): " + ex);
             }
 
+            CacheP2InteractionRefs();
+
             LoggerInstance.Msg("Spawned P2: " + _p2Spider.name +
                                " | P2InputTransform=" + (P2InputTransform != null ? P2InputTransform.name : "null") +
-                               " | P2WebManager=" + (_p2WebManager != null));
+                               " | P2WebManager=" + (_p2WebManager != null) +
+                               " | P2SpiderInteraction=" + (_p2SpiderInteraction != null));
+        }
+
+        private void CacheP2InteractionRefs()
+        {
+            _p2SpiderInteraction = null;
+            _p2SpiderMobileInteractMethod = null;
+
+            if (_p2Spider == null)
+                return;
+
+            try
+            {
+                var spiderInteractionType = AccessTools.TypeByName("_Scripts.Spider.SpiderInteraction");
+                if (spiderInteractionType == null)
+                    return;
+
+                _p2SpiderInteraction = _p2Spider.GetComponentInChildren(spiderInteractionType, true) as Component;
+                if (_p2SpiderInteraction == null)
+                    return;
+
+                _p2SpiderMobileInteractMethod = AccessTools.Method(_p2SpiderInteraction.GetType(), "MobileInteract");
+            }
+            catch { }
+        }
+
+        private void TriggerP2Interact()
+        {
+            if (_p2Spider == null)
+                return;
+
+            if (_p2SpiderInteraction == null || _p2SpiderMobileInteractMethod == null)
+                CacheP2InteractionRefs();
+
+            if (_p2SpiderInteraction == null || _p2SpiderMobileInteractMethod == null)
+                return;
+
+            try
+            {
+                _p2SpiderMobileInteractMethod.Invoke(_p2SpiderInteraction, null);
+            }
+            catch (Exception ex)
+            {
+                LoggerInstance.Warning("[P2Interact] MobileInteract invoke failed (non-fatal): " + ex.Message);
+            }
         }
 
         private void InitP2CameraRig()
@@ -1160,6 +1260,8 @@ namespace AWJSplitScreen
             }
 
             _webController = null;
+            _p2SpiderInteraction = null;
+            _p2SpiderMobileInteractMethod = null;
 
             _p1InputTransform = null;
             _p2CamRigInited = false;
@@ -2325,6 +2427,99 @@ namespace AWJSplitScreen
         }
     }
 
+    internal static class SpiderInteractionPatches
+    {
+        private static FieldInfo _bodyMovementField;
+        private static FieldInfo _isPlayerField;
+        private static Type _bodyMovementType;
+
+        private static bool IsP2(object __instance)
+        {
+            var mb = __instance as MonoBehaviour;
+            if (mb == null) return false;
+            return mb.GetComponentInParent<P2Marker>() != null;
+        }
+
+        private static void CacheFields(object __instance)
+        {
+            if (__instance == null) return;
+
+            if (_bodyMovementField == null)
+            {
+                var t = __instance.GetType();
+                _bodyMovementField = t.GetField("bodyMovement", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+            }
+
+            if (_bodyMovementType == null)
+                _bodyMovementType = AccessTools.TypeByName("_Scripts.Spider.BodyMovement");
+
+            if (_isPlayerField == null && _bodyMovementType != null)
+                _isPlayerField = _bodyMovementType.GetField("isPlayer", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+        }
+
+        private static object GetBodyMovement(object __instance)
+        {
+            if (__instance == null) return null;
+
+            CacheFields(__instance);
+
+            if (_bodyMovementField != null)
+            {
+                try
+                {
+                    var movement = _bodyMovementField.GetValue(__instance);
+                    if (movement != null) return movement;
+                }
+                catch { }
+            }
+
+            var mb = __instance as MonoBehaviour;
+            if (mb != null && _bodyMovementType != null)
+            {
+                try { return mb.GetComponentInParent(_bodyMovementType); }
+                catch { }
+            }
+
+            return null;
+        }
+
+        public static void TemporarilyEnableIsPlayer_Prefix(object __instance, ref bool __state)
+        {
+            __state = false;
+
+            if (!IsP2(__instance))
+                return;
+
+            var movement = GetBodyMovement(__instance);
+            if (movement == null || _isPlayerField == null)
+                return;
+
+            try
+            {
+                var current = _isPlayerField.GetValue(movement);
+                if (current is bool && !(bool)current)
+                {
+                    _isPlayerField.SetValue(movement, true);
+                    __state = true;
+                }
+            }
+            catch { }
+        }
+
+        public static void TemporarilyEnableIsPlayer_Postfix(object __instance, bool __state)
+        {
+            if (!__state)
+                return;
+
+            var movement = GetBodyMovement(__instance);
+            if (movement == null || _isPlayerField == null)
+                return;
+
+            try { _isPlayerField.SetValue(movement, false); }
+            catch { }
+        }
+    }
+
     internal static class BodyMovementPatches
     {
         private static bool IsP2(object __instance)
@@ -3218,6 +3413,16 @@ namespace AWJSplitScreen
             var gp = GetGamepadAtIndex(index);
             bool south = ReadButtonDown(gp, _buttonSouthProp);
             return kb || south;
+        }
+
+        public static bool IsP2InteractPressedNow(bool useGamepad, int index, string kbProp, KeyCode kbFallback)
+        {
+            bool kb = Down(kbProp, kbFallback);
+            if (!useGamepad) return kb;
+
+            var gp = GetGamepadAtIndex(index);
+            bool west = ReadButtonDown(gp, _buttonWestProp);
+            return kb || west;
         }
 
         public static bool IsP2AttachHeldNow(bool useGamepad, int index, float triggerThreshold, string kbProp, KeyCode kbFallback)
