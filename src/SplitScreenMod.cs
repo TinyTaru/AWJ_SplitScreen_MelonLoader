@@ -1179,7 +1179,12 @@ namespace AWJSplitScreen
             var speed = _p2LookSpeed != null ? _p2LookSpeed.Value : 90f;
             var dt = Time.deltaTime;
             float yawDelta = yawInput * speed * dt;
-            float pitchDelta = -pitchInput * speed * dt;
+            // Pitch sign matches P1's CameraMouseLook (line 97: AngleAxis(-mouseLook.y, right)
+            // applied to a camera under a yaw-transform). Since our _p2CamDir is the
+            // pivot→camera vector and `right = up × camDir`, a positive pitchInput
+            // (stick up) needs to rotate camDir by a positive angle around `right` for
+            // the camera-forward (which is -camDir) to tilt UP — i.e. NOT negated.
+            float pitchDelta = pitchInput * speed * dt;
 
             // --- Incremental orbit ---
             // Mirror P1's CameraMouseLook + FollowTarget: yaw is around WORLD up
