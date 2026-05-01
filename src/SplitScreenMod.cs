@@ -75,13 +75,47 @@ namespace AWJSplitScreen
 
         private Vector3 _p2CamDir;        // direction from pivot to camera (normalized)
         private Vector3 _p2SmoothUp;      // smoothed spider surface up (lerped each frame)
-        private float _p2CamDistance;
+        private float _p2CamDistance;     // current dynamic distance (mirrors Cinemachine3rdPersonFollow.CameraDistance)
         private bool _p2CamRigInited;
-        private float _p2CamBaseHeight;   // local Y offset (up from InputTransform)
-        private float _p2CamBaseDist;     // horizontal distance behind
-        private bool _p2CamBasePoseCached;
-        private int _p2CamRecaptureFrame;  // frame at which to re-read P1 camera distance
         private float _p2CamDebugNextLog;
+
+        // --- Dynamic camera offset (mirrors P1's _Scripts.Camera.CameraZoom logic) ---
+        // P1 FollowTarget pins the v-cam follow target at (spider.position + spider.up * 1f)
+        // each FixedUpdate, so the pivot height stays a constant 1.0f along the spider's
+        // surface normal. We replicate that exactly for P2.
+        private const float P2CamPivotOffset = 1.0f;
+
+        // P1 CameraZoom reflection cache (settings are shared between P1 and P2).
+        private object _p1CameraZoom;
+        private float _p1MinZoom = 3.0f;
+        private float _p1MaxZoom = 12.0f;
+        private bool _p1ZoomInWhenLookingUp;
+        private bool _p1CameraZoomCached;
+
+        // P2 BodyMovement reflection cache (for velocity / state input to the zoom curve).
+        private Component _p2BodyMovement;
+        private PropertyInfo _bmRbProp, _bmStateProp, _bmWebTouchedProp;
+        private object _bmWalkingState;
+
+        // SettingsController.AutoZoom static accessor.
+        private PropertyInfo _settingsAutoZoomProp;
+
+        // Exponentially-decayed zoom (mirrors CameraZoom.cameraDistance private field).
+        private float _p2CamSmoothedZoom = -1f;
+
+        // --- Camera collision (mirrors Cinemachine3rdPersonFollow built-in collision) ---
+        // P1 has no scripted collision; it relies entirely on Cinemachine3rdPersonFollow's
+        // CameraRadius / CameraCollisionFilter / IgnoreTag / Damping(Into|From)Collision.
+        // We replicate that with a SphereCast + asymmetric exponential damping for P2.
+        private bool _p1FollowCached;
+        private float _p2CamRadius = 0.2f;
+        private LayerMask _p2CamCollisionMask = ~0;          // default everything
+        private string _p2CamIgnoreTag = "";
+        private float _p2CamDampingIn = 0.1f;                // snappy when obstacle pushes us in
+        private float _p2CamDampingOut = 0.5f;               // smooth when obstacle clears
+        private float _p2CamCollidedDistance = -1f;          // damped collision-clamped distance
+        private Collider[] _p2SelfColliders;                 // cached spider colliders to ignore
+        private int _p2SelfColliderRefreshFrame = -1;
 
         private Component _webController;
         private P2WebManager _p2WebManager;
@@ -969,28 +1003,7 @@ namespace AWJSplitScreen
                 return;
             }
 
-            // Only read P1's camera offset on the very first init (at spawn).
-            if (!_p2CamBasePoseCached)
-            {
-                _p2CamBaseHeight = 1.0f;
-                _p2CamBaseDist = P2CameraDistance;
-
-                if (_camLeftOrTop != null && _p1InputTransform != null)
-                {
-                    var delta = _camLeftOrTop.transform.position - _p1InputTransform.position;
-                    var hDist = new Vector3(delta.x, 0f, delta.z).magnitude;
-                    LoggerInstance.Msg("[P2CamDebug] P1 camera offset: delta=" + delta
-                        + " hDist=" + hDist.ToString("F2") + " height=" + delta.y.ToString("F2"));
-                    if (hDist > 0.3f && hDist < 60f)
-                    {
-                        _p2CamBaseDist = hDist;
-                        _p2CamBaseHeight = delta.y;
-                    }
-                }
-                _p2CamBasePoseCached = true;
-            }
-
-            _p2CamDistance = _p2CamBaseDist;
+            EnsureCameraDynamicsCached();
 
             // Initialize camera direction: behind and slightly above the spider
             var p2Anchor = P2InputTransform != null ? P2InputTransform : _p2Spider.transform;
@@ -1001,15 +1014,22 @@ namespace AWJSplitScreen
             // Tilt upward slightly (15 degrees worth)
             _p2CamDir = (behind + surfUp * 0.27f).normalized;
 
-            _p2CamRigInited = true;
-            // Schedule a re-read of P1's camera distance after Cinemachine settles (~1.5s at 60fps)
-            _p2CamRecaptureFrame = Time.frameCount + 90;
+            // Prime the dynamic distance: read P1's current Cinemachine 3rd-person
+            // CameraDistance so P2 starts at the same zoom P1 is currently using,
+            // then exponential-decay smoothing drives it from P2's own velocity.
+            float seed = TryReadP1CameraDistance(out var p1Dist) ? p1Dist
+                : Mathf.Clamp(P2CameraDistance, _p1MinZoom, _p1MaxZoom);
+            _p2CamSmoothedZoom = seed;
+            _p2CamDistance = seed;
 
+            _p2CamRigInited = true;
             ApplyP2CameraTransform();
 
             LoggerInstance.Msg("[P2CamDebug] InitP2CameraRig done: dist=" + _p2CamDistance.ToString("F2")
-                + " height=" + _p2CamBaseHeight.ToString("F2")
+                + " pivotOffset=" + P2CamPivotOffset.ToString("F2")
                 + " camDir=" + _p2CamDir
+                + " p1MinZoom=" + _p1MinZoom.ToString("F2") + " p1MaxZoom=" + _p1MaxZoom.ToString("F2")
+                + " p1ZoomInUp=" + _p1ZoomInWhenLookingUp
                 + " camPos=" + _camRightOrBottom.transform.position + " camRot=" + _camRightOrBottom.transform.rotation.eulerAngles);
         }
 
@@ -1017,21 +1037,116 @@ namespace AWJSplitScreen
         {
             var p2Anchor = P2InputTransform != null ? P2InputTransform : _p2Spider.transform;
 
-            // Pivot above spider along smoothed surface up
-            var pivot = p2Anchor.position + _p2SmoothUp * _p2CamBaseHeight;
+            // Pivot above spider along smoothed surface up (matches P1 FollowTarget:
+            // base.transform.position = target.position + target.up).
+            var pivot = p2Anchor.position + _p2SmoothUp * P2CamPivotOffset;
+
+            // Mirror Cinemachine3rdPersonFollow built-in collision: shorten _p2CamDistance
+            // when an obstacle is in the way, with asymmetric damping (fast in, slow out).
+            float effectiveDist = ApplyP2CameraCollision(pivot, _p2CamDir, _p2CamDistance, Time.deltaTime);
 
             // Camera position along the orbit direction
-            var desiredPos = pivot + _p2CamDir * _p2CamDistance;
+            var desiredPos = pivot + _p2CamDir * effectiveDist;
 
             // Look ABOVE the pivot so the spider sits in the lower portion of the screen,
             // matching P1's Cinemachine framing. Screen center then points at the horizon/walls
             // ahead, which is where the target dot ray (camera.forward) should hit.
-            float lookAbove = _p2CamDistance * 0.15f;
+            float lookAbove = effectiveDist * 0.15f;
             var lookTarget = pivot + Vector3.up * lookAbove;
             var lookDir = lookTarget - desiredPos;
             if (lookDir.sqrMagnitude > 0.001f)
                 _camRightOrBottom.transform.rotation = Quaternion.LookRotation(lookDir, Vector3.up);
             _camRightOrBottom.transform.position = desiredPos;
+        }
+
+        // Mirrors Cinemachine3rdPersonFollow's built-in collision: spherecast from the
+        // pivot toward the camera; if an obstacle is in the way, clamp the distance to
+        // the hit point. Apply asymmetric exponential damping so the camera snaps in
+        // quickly (DampingIntoCollision) but eases back out slowly (DampingFromCollision).
+        // Filters out trigger volumes (so CameraWaterTrigger and similar don't push the
+        // camera), the IgnoreTag from P1's settings, and the P2 spider's own colliders.
+        private float ApplyP2CameraCollision(Vector3 pivot, Vector3 camDir, float desiredDist, float dt)
+        {
+            float radius = _p2CamRadius;
+            float targetDist = desiredDist;
+
+            try
+            {
+                // Refresh self-collider cache periodically (spider can spawn/despawn parts).
+                int frame = Time.frameCount;
+                if (_p2SelfColliders == null || frame - _p2SelfColliderRefreshFrame > 240)
+                {
+                    if (_p2Spider != null)
+                        _p2SelfColliders = _p2Spider.GetComponentsInChildren<Collider>(true);
+                    _p2SelfColliderRefreshFrame = frame;
+                }
+
+                // SphereCastAll from pivot along camDir up to (desiredDist + radius).
+                // Origin is pulled slightly back toward the pivot (-radius along dir) so
+                // that we still detect obstacles whose surface is right at the pivot.
+                Vector3 origin = pivot - camDir * radius;
+                float castLen = desiredDist + radius;
+                var hits = Physics.SphereCastAll(
+                    origin, radius, camDir, castLen,
+                    _p2CamCollisionMask, QueryTriggerInteraction.Ignore);
+
+                float bestHitDist = float.PositiveInfinity;
+                if (hits != null)
+                {
+                    for (int i = 0; i < hits.Length; i++)
+                    {
+                        var h = hits[i];
+                        if (h.collider == null) continue;
+                        if (!string.IsNullOrEmpty(_p2CamIgnoreTag))
+                        {
+                            try { if (h.collider.CompareTag(_p2CamIgnoreTag)) continue; } catch { }
+                        }
+                        if (IsP2SelfCollider(h.collider)) continue;
+                        // h.distance is from the (pulled-back) origin; convert to
+                        // distance from pivot along camDir.
+                        float distFromPivot = h.distance - radius;
+                        if (distFromPivot < bestHitDist) bestHitDist = distFromPivot;
+                    }
+                }
+
+                if (bestHitDist < desiredDist)
+                {
+                    // Keep a tiny minimum so the camera never lands inside the pivot.
+                    targetDist = Mathf.Max(0.05f, bestHitDist);
+                }
+            }
+            catch { /* ignore — fall through with damping */ }
+
+            // First call: seed without damping.
+            if (_p2CamCollidedDistance < 0f) { _p2CamCollidedDistance = targetDist; return targetDist; }
+
+            // Asymmetric damping: shrinking → DampingIntoCollision; growing → DampingFromCollision.
+            float damping = (targetDist < _p2CamCollidedDistance) ? _p2CamDampingIn : _p2CamDampingOut;
+            if (damping <= 0.0001f || dt <= 0f)
+                _p2CamCollidedDistance = targetDist;
+            else
+                _p2CamCollidedDistance = targetDist + (_p2CamCollidedDistance - targetDist) * Mathf.Exp(-dt / damping);
+
+            return _p2CamCollidedDistance;
+        }
+
+        private bool IsP2SelfCollider(Collider c)
+        {
+            if (c == null || _p2SelfColliders == null) return false;
+            for (int i = 0; i < _p2SelfColliders.Length; i++)
+                if (_p2SelfColliders[i] == c) return true;
+            // Fallback: walk the transform parent chain looking for the spider root.
+            if (_p2Spider != null)
+            {
+                var t = c.transform;
+                var rootT = _p2Spider.transform;
+                while (t != null)
+                {
+                    if (t == rootT) return true;
+                    t = t.parent;
+                }
+            }
+            return false;
         }
 
         private void UpdateP2CameraLook()
@@ -1042,25 +1157,7 @@ namespace AWJSplitScreen
             if (!_p2CamRigInited)
                 InitP2CameraRig();
 
-            // Delayed recapture: re-read P1's camera distance after Cinemachine settles
-            if (_p2CamRecaptureFrame > 0 && Time.frameCount >= _p2CamRecaptureFrame)
-            {
-                _p2CamRecaptureFrame = 0;
-                if (_camLeftOrTop != null && _p1InputTransform != null)
-                {
-                    var delta = _camLeftOrTop.transform.position - _p1InputTransform.position;
-                    var hDist = new Vector3(delta.x, 0f, delta.z).magnitude;
-                    if (hDist > 0.3f && hDist < 60f)
-                    {
-                        _p2CamBaseDist = hDist;
-                        _p2CamBaseHeight = delta.y;
-                        _p2CamDistance = _p2CamBaseDist;
-                        LoggerInstance.Msg("[P2CamDebug] Recaptured P1 camera offset: hDist=" + hDist.ToString("F2")
-                            + " height=" + delta.y.ToString("F2")
-                            + " (settled after " + 90 + " frames)");
-                    }
-                }
-            }
+            EnsureCameraDynamicsCached();
 
             var prePos = _camRightOrBottom.transform.position;
 
@@ -1109,6 +1206,12 @@ namespace AWJSplitScreen
 
             _p2CamDir = _p2CamDir.normalized;
 
+            // --- True dynamic camera offset (mirrors P1 CameraZoom.HandleCameraZoom) ---
+            // The camera's forward is approximately -_p2CamDir (it looks from desiredPos
+            // back toward the pivot). That's good enough for the zoom-in-when-looking-up
+            // dot product, and avoids a chicken-and-egg with the rotation we set later.
+            _p2CamDistance = ComputeP2DynamicCameraDistance(-_p2CamDir, surfUp, dt);
+
             ApplyP2CameraTransform();
 
             // Throttled debug log every 2 seconds
@@ -1120,11 +1223,254 @@ namespace AWJSplitScreen
                 LoggerInstance.Msg("[P2CamDebug] UpdateP2CameraLook:"
                     + " anchor=" + p2Anchor.name + " anchorPos=" + p2Anchor.position
                     + " surfUp=" + surfUp + " camDir=" + _p2CamDir
-                    + " dist=" + _p2CamDistance.ToString("F2") + " height=" + _p2CamBaseHeight.ToString("F2")
+                    + " dist=" + _p2CamDistance.ToString("F2") + " smoothedZoom=" + _p2CamSmoothedZoom.ToString("F2")
+                    + " pivotOff=" + P2CamPivotOffset.ToString("F2")
                     + " | prePos=" + prePos + " wantPos=" + wantPos + " preDelta=" + delta.ToString("F3")
                     + " | wantRot=" + _camRightOrBottom.transform.rotation.eulerAngles
                     + " | p1CamPos=" + (_camLeftOrTop != null ? _camLeftOrTop.transform.position.ToString() : "null"));
             }
+        }
+
+        // Lazily caches the P1 _Scripts.Camera.CameraZoom instance + private field info,
+        // and the P2 _Scripts.Spider.BodyMovement instance + property accessors. Safe to
+        // call every frame; once everything is found we just no-op.
+        private void EnsureCameraDynamicsCached()
+        {
+            if (!_p1CameraZoomCached)
+            {
+                try
+                {
+                    var czType = AccessTools.TypeByName("_Scripts.Camera.CameraZoom");
+                    if (czType != null)
+                    {
+                        var arr = UnityEngine.Object.FindObjectsOfType(czType, true);
+                        if (arr != null && arr.Length > 0) _p1CameraZoom = arr[0];
+                        if (_p1CameraZoom != null)
+                        {
+                            const BindingFlags F = BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public;
+                            var minF = czType.GetField("minZoom", F);
+                            var maxF = czType.GetField("maxZoom", F);
+                            var zupF = czType.GetField("zoomInWhenLookingUp", F);
+                            if (minF != null) _p1MinZoom = (float)minF.GetValue(_p1CameraZoom);
+                            if (maxF != null) _p1MaxZoom = (float)maxF.GetValue(_p1CameraZoom);
+                            if (zupF != null) _p1ZoomInWhenLookingUp = (bool)zupF.GetValue(_p1CameraZoom);
+                            LoggerInstance.Msg("[P2CamDyn] P1 CameraZoom cached: min=" + _p1MinZoom.ToString("F2")
+                                + " max=" + _p1MaxZoom.ToString("F2") + " zoomInUp=" + _p1ZoomInWhenLookingUp);
+                            _p1CameraZoomCached = true;
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    LoggerInstance.Warning("[P2CamDyn] CameraZoom reflection failed: " + ex.Message);
+                    _p1CameraZoomCached = true; // don't keep retrying
+                }
+            }
+
+            if (_settingsAutoZoomProp == null)
+            {
+                try
+                {
+                    var sct = AccessTools.TypeByName("_Scripts.Singletons.SettingsController");
+                    if (sct != null)
+                        _settingsAutoZoomProp = sct.GetProperty("AutoZoom", BindingFlags.Static | BindingFlags.Public);
+                }
+                catch { }
+            }
+
+            if (_p2Spider != null && _p2BodyMovement == null)
+            {
+                try
+                {
+                    var bmType = AccessTools.TypeByName("_Scripts.Spider.BodyMovement");
+                    if (bmType != null)
+                    {
+                        _p2BodyMovement = _p2Spider.GetComponentInChildren(bmType, true) as Component;
+                        const BindingFlags F = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+                        _bmRbProp = bmType.GetProperty("Rb", F);
+                        _bmStateProp = bmType.GetProperty("State", F);
+                        _bmWebTouchedProp = bmType.GetProperty("WebTouched", F);
+                        var msType = bmType.GetNestedType("MovementState", BindingFlags.Public);
+                        if (msType != null)
+                        {
+                            try { _bmWalkingState = Enum.Parse(msType, "Walking"); } catch { }
+                        }
+                        LoggerInstance.Msg("[P2CamDyn] P2 BodyMovement cached: bm=" + (_p2BodyMovement != null)
+                            + " Rb=" + (_bmRbProp != null) + " State=" + (_bmStateProp != null)
+                            + " WebTouched=" + (_bmWebTouchedProp != null) + " walking=" + (_bmWalkingState != null));
+                    }
+                }
+                catch (Exception ex)
+                {
+                    LoggerInstance.Warning("[P2CamDyn] BodyMovement reflection failed: " + ex.Message);
+                }
+            }
+
+            if (!_p1FollowCached)
+            {
+                if (TryGetP1Follow3rdPerson(out var follow, out var followType))
+                {
+                    try
+                    {
+                        const BindingFlags F = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+                        var radF = followType.GetField("CameraRadius", F);
+                        var maskF = followType.GetField("CameraCollisionFilter", F);
+                        var tagF = followType.GetField("IgnoreTag", F);
+                        var dInF = followType.GetField("DampingIntoCollision", F);
+                        var dOutF = followType.GetField("DampingFromCollision", F);
+                        if (radF != null) _p2CamRadius = Mathf.Max(0.01f, (float)radF.GetValue(follow));
+                        if (maskF != null)
+                        {
+                            var v = maskF.GetValue(follow);
+                            if (v is LayerMask lm) _p2CamCollisionMask = lm;
+                            else if (v is int i) _p2CamCollisionMask = i;
+                        }
+                        if (tagF != null) _p2CamIgnoreTag = (tagF.GetValue(follow) as string) ?? "";
+                        if (dInF != null) _p2CamDampingIn = Mathf.Max(0f, (float)dInF.GetValue(follow));
+                        if (dOutF != null) _p2CamDampingOut = Mathf.Max(0f, (float)dOutF.GetValue(follow));
+                        _p1FollowCached = true;
+                        LoggerInstance.Msg("[P2CamDyn] P1 3rdPersonFollow collision cached: r=" + _p2CamRadius.ToString("F2")
+                            + " mask=" + ((int)_p2CamCollisionMask) + " ignoreTag=\"" + _p2CamIgnoreTag + "\""
+                            + " dampIn=" + _p2CamDampingIn.ToString("F2") + " dampOut=" + _p2CamDampingOut.ToString("F2"));
+                    }
+                    catch (Exception ex)
+                    {
+                        LoggerInstance.Warning("[P2CamDyn] 3rdPersonFollow collision reflection failed: " + ex.Message);
+                        _p1FollowCached = true;
+                    }
+                }
+            }
+        }
+
+        // Resolves P1's Cinemachine3rdPersonFollow body component on the follow vcam.
+        // Centralized so both distance reads and collision-setting reads can share the
+        // generic-method lookup, and so we don't need a compile-time Cinemachine reference.
+        private bool TryGetP1Follow3rdPerson(out object follow, out Type followType)
+        {
+            follow = null; followType = null;
+            try
+            {
+                var ccType = AccessTools.TypeByName("_Scripts.Singletons.CameraController");
+                if (ccType == null) return false;
+                var instProp = ccType.GetProperty("Instance", BindingFlags.Static | BindingFlags.Public);
+                var cc = instProp != null ? instProp.GetValue(null) : null;
+                if (cc == null)
+                {
+                    var arr = UnityEngine.Object.FindObjectsOfType(ccType, true);
+                    if (arr != null && arr.Length > 0) cc = arr[0];
+                }
+                if (cc == null) return false;
+                var camField = ccType.GetField("cinemachineFollowCamera", BindingFlags.Instance | BindingFlags.NonPublic);
+                if (camField == null) return false;
+                var vcam = camField.GetValue(cc);
+                if (vcam == null) return false;
+
+                followType = AccessTools.TypeByName("Cinemachine.Cinemachine3rdPersonFollow");
+                if (followType == null) return false;
+
+                MethodInfo generic = null;
+                var methods = vcam.GetType().GetMethods(BindingFlags.Instance | BindingFlags.Public);
+                for (int i = 0; i < methods.Length; i++)
+                {
+                    var m = methods[i];
+                    if (m.Name != "GetCinemachineComponent") continue;
+                    if (!m.IsGenericMethodDefinition) continue;
+                    if (m.GetParameters().Length != 0) continue;
+                    generic = m; break;
+                }
+                if (generic == null) return false;
+
+                follow = generic.MakeGenericMethod(followType).Invoke(vcam, null);
+                return follow != null;
+            }
+            catch { }
+            return false;
+        }
+
+        // Mirrors _Scripts.Camera.CameraZoom.HandleCameraZoom for P2:
+        //   - autoZoom: target = clamp(minZoom + speed, max=maxZoom)
+        //   - non-autoZoom: target = clamp(P2CameraDistance pref, min, max)
+        //   - smoothed via ExponentialDecay(current, target, decay=5, dt)
+        //   - if zoomInWhenLookingUp && walking && !webTouched:
+        //       finalDist = Lerp(smoothed, 0, max(dot(spider.up, cam.forward), 0) * 1.5)
+        private float ComputeP2DynamicCameraDistance(Vector3 camForward, Vector3 surfUp, float dt)
+        {
+            float minZoom = _p1MinZoom;
+            float maxZoom = Mathf.Max(_p1MaxZoom, minZoom + 0.01f);
+
+            bool autoZoom = false;
+            try
+            {
+                if (_settingsAutoZoomProp != null)
+                    autoZoom = (bool)_settingsAutoZoomProp.GetValue(null);
+            }
+            catch { }
+
+            float speed = 0f;
+            bool walking = false;
+            bool webTouched = false;
+            try
+            {
+                if (_p2BodyMovement != null)
+                {
+                    if (_bmRbProp != null)
+                    {
+                        var rb = _bmRbProp.GetValue(_p2BodyMovement) as Rigidbody;
+                        if (rb != null) speed = rb.linearVelocity.magnitude;
+                    }
+                    if (_bmStateProp != null && _bmWalkingState != null)
+                    {
+                        var st = _bmStateProp.GetValue(_p2BodyMovement);
+                        walking = st != null && st.Equals(_bmWalkingState);
+                    }
+                    if (_bmWebTouchedProp != null)
+                    {
+                        var wt = _bmWebTouchedProp.GetValue(_p2BodyMovement);
+                        if (wt is bool b) webTouched = b;
+                    }
+                }
+            }
+            catch { }
+
+            float targetZoom = autoZoom
+                ? Mathf.Min(minZoom + speed * 1f, maxZoom)
+                : Mathf.Clamp(P2CameraDistance, minZoom, maxZoom);
+
+            if (_p2CamSmoothedZoom < 0f) _p2CamSmoothedZoom = targetZoom;
+            _p2CamSmoothedZoom = ExponentialDecay(_p2CamSmoothedZoom, targetZoom, 5f, dt);
+
+            float finalDist = _p2CamSmoothedZoom;
+            if (_p1ZoomInWhenLookingUp && walking && !webTouched)
+            {
+                float dot = Mathf.Max(Vector3.Dot(surfUp, camForward.normalized), 0f);
+                finalDist = Mathf.Lerp(_p2CamSmoothedZoom, 0f, dot * 1.5f);
+            }
+            return finalDist;
+        }
+
+        // Matches the standard signature of _Scripts.Utils.Utils.ExponentialDecay used by
+        // CameraZoom: an exponential approach to `target` with decay rate `decay` over `dt`.
+        private static float ExponentialDecay(float current, float target, float decay, float dt)
+        {
+            return target + (current - target) * Mathf.Exp(-decay * dt);
+        }
+
+        // Reads the current Cinemachine3rdPersonFollow.CameraDistance off P1's follow vcam
+        // via reflection (the field is private in CameraController). Returns false if
+        // anything is missing so callers can fall back gracefully.
+        private bool TryReadP1CameraDistance(out float dist)
+        {
+            dist = 0f;
+            try
+            {
+                if (!TryGetP1Follow3rdPerson(out var follow, out var followType)) return false;
+                var distField = followType.GetField("CameraDistance", BindingFlags.Instance | BindingFlags.Public);
+                if (distField == null) return false;
+                dist = (float)distField.GetValue(follow);
+                return dist > 0.01f;
+            }
+            catch { }
+            return false;
         }
 
         private static float NormalizeSignedAngle(float angle)
@@ -1265,7 +1611,17 @@ namespace AWJSplitScreen
 
             _p1InputTransform = null;
             _p2CamRigInited = false;
-            _p2CamBasePoseCached = false;
+            _p2CamSmoothedZoom = -1f;
+            _p2CamCollidedDistance = -1f;
+            _p2SelfColliders = null;
+            _p2SelfColliderRefreshFrame = -1;
+            _p2BodyMovement = null;
+            _bmRbProp = null;
+            _bmStateProp = null;
+            _bmWebTouchedProp = null;
+            _bmWalkingState = null;
+            // Note: _p1CameraZoom + _p1CameraZoomCached deliberately NOT reset — those
+            // settings come from a P1 component that survives across F9 toggles.
 
             P2InputTransform = null;
             P2Camera = null;

@@ -17,6 +17,12 @@
     <PackageReference Include="HarmonyX" Version="2.11.1" PrivateAssets="all" />
   </ItemGroup>
 
+  <!-- Decompiled-source reference dumps (ilspycmd output). Reference-only; never compile. -->
+  <ItemGroup>
+    <Compile Remove="ilspy_WebController\**\*.cs" />
+    <None Include="ilspy_WebController\**\*.cs" />
+  </ItemGroup>
+
   <ItemGroup>
     <Reference Include="UnityEngine" Condition="Exists('$(GameManagedPath)\UnityEngine.dll')">
       <HintPath>$(GameManagedPath)\UnityEngine.dll</HintPath>
