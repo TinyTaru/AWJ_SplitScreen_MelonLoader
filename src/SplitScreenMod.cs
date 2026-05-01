@@ -1005,14 +1005,16 @@ namespace AWJSplitScreen
 
             EnsureCameraDynamicsCached();
 
-            // Initialize camera direction: behind and slightly above the spider
+            // Initialize camera direction: behind and slightly above the spider.
+            // Mirror P1: orbit is in WORLD space (FollowTarget LookAt's world up,
+            // CameraMouseLook yaws on local Y ≈ world up). Only the pivot translates
+            // along the spider's surface normal — the orbit itself stays world-aligned.
             var p2Anchor = P2InputTransform != null ? P2InputTransform : _p2Spider.transform;
             _p2SmoothUp = p2Anchor.up;
-            var surfUp = _p2SmoothUp;
-            var behind = -Vector3.ProjectOnPlane(p2Anchor.forward, surfUp).normalized;
-            if (behind.sqrMagnitude < 0.001f) behind = -p2Anchor.forward;
-            // Tilt upward slightly (15 degrees worth)
-            _p2CamDir = (behind + surfUp * 0.27f).normalized;
+            var behind = -Vector3.ProjectOnPlane(p2Anchor.forward, Vector3.up).normalized;
+            if (behind.sqrMagnitude < 0.001f) behind = Vector3.back;
+            // Tilt upward slightly (15 degrees worth) — also in world up.
+            _p2CamDir = (behind + Vector3.up * 0.27f).normalized;
 
             // Prime the dynamic distance: read P1's current Cinemachine 3rd-person
             // CameraDistance so P2 starts at the same zoom P1 is currently using,
@@ -1180,25 +1182,34 @@ namespace AWJSplitScreen
             float pitchDelta = -pitchInput * speed * dt;
 
             // --- Incremental orbit ---
-            // Orbit uses a smoothed version of the spider's surface normal as the "up" axis.
-            // On flat ground this is ~world-up; on walls it smoothly becomes the wall normal.
+            // Mirror P1's CameraMouseLook + FollowTarget: yaw is around WORLD up
+            // (FollowTarget does LookAt(player, Vector3.up); CameraMouseLook then
+            // yaws localRot around Vector3.up of that follow-target, which equals
+            // world up). Pitch is around the world-horizontal right axis. The orbit
+            // stays world-aligned; on walls/ceilings the pivot translates with the
+            // spider but the camera doesn't roll. _p2SmoothUp remains the smoothed
+            // surface normal — used only for the pivot offset and the look-up-zoom
+            // dot product (which uses spider.up in P1's CameraZoom).
             var p2Anchor = P2InputTransform != null ? P2InputTransform : _p2Spider.transform;
             _p2SmoothUp = Vector3.Slerp(_p2SmoothUp, p2Anchor.up, dt * 3f).normalized;
             var surfUp = _p2SmoothUp;
+            var worldUp = Vector3.up;
 
-            // Yaw: rotate camera direction around the surface normal
+            // Yaw: rotate camera direction around world up.
             if (Mathf.Abs(yawDelta) > 0.001f)
-                _p2CamDir = Quaternion.AngleAxis(yawDelta, surfUp) * _p2CamDir;
+                _p2CamDir = Quaternion.AngleAxis(yawDelta, worldUp) * _p2CamDir;
 
-            // Pitch: rotate around the local right axis (perpendicular to surfUp and camDir)
+            // Pitch: rotate around the world-horizontal right axis (perpendicular to
+            // worldUp and camDir). Clamp pitch relative to worldUp so the camera
+            // never flips overhead/underneath, matching P1's clampY behavior.
             if (Mathf.Abs(pitchDelta) > 0.001f)
             {
-                var right = Vector3.Cross(surfUp, _p2CamDir).normalized;
+                var right = Vector3.Cross(worldUp, _p2CamDir);
                 if (right.sqrMagnitude > 0.001f)
                 {
+                    right = right.normalized;
                     var newDir = Quaternion.AngleAxis(pitchDelta, right) * _p2CamDir;
-                    // Clamp pitch: don't let camera go below surface plane or directly overhead
-                    float angleFromUp = Vector3.Angle(newDir, surfUp);
+                    float angleFromUp = Vector3.Angle(newDir, worldUp);
                     if (angleFromUp > 15f && angleFromUp < 165f)
                         _p2CamDir = newDir.normalized;
                 }
