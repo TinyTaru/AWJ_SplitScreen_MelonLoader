@@ -148,7 +148,7 @@ namespace AWJSplitScreen
             SceneManager.sceneLoaded += (_, __) => MelonCoroutines.Start(DeferredSetup());
 
             LoggerInstance.Msg("AWJ Split Screen + P2 Inject v0.2.2 loaded.");
-            LoggerInstance.Msg("F9 split, F10 orientation | P2 Move: IJKL or Gamepad LStick | P2 Look: N/M or RStickX | P2 Jump: A | P2 Interact: H/X | P2 Web: U/RT shoot, P/LT attach, O/B delete, RightCtrl/RB release.");
+            LoggerInstance.Msg("F9 split, F10 orientation | P2 Move: IJKL or Gamepad LStick | P2 Look: N/M or RStickX | P2 Jump: A | P2 Interact: H/X | P2 Web: U/RT shoot, P/RT attach, O/B delete, RightCtrl/RB release.");
             LoggerInstance.Msg("Tip: If both controllers still move P1, ensure FilterP1FromP2Gamepad=true and P2_GamepadIndex is the second pad (usually 1).");
         }
 
@@ -2136,8 +2136,8 @@ namespace AWJSplitScreen
                 bool shootUp   = !shootHeld && _shootHeldPrev;
                 _shootHeldPrev = shootHeld;
 
-                // LT uses hysteresis: higher threshold to start, lower to release
-                // This prevents rapid on/off flickering when LT hovers near threshold
+                // Trigger attach uses hysteresis: higher threshold to start, lower to release
+                // This prevents rapid on/off flickering when the trigger hovers near threshold
                 float attachThresh = _attachHeldPrev ? (SplitScreenMod.P2TriggerThreshold * 0.5f) : SplitScreenMod.P2TriggerThreshold;
                 bool attachHeld = InputCompat.IsP2AttachHeldNow(
                     SplitScreenMod.P2UseGamepad,
@@ -3803,8 +3803,8 @@ namespace AWJSplitScreen
             if (!useGamepad) return kb;
 
             var gp = GetGamepadAtIndex(index);
-            float lt = ReadAxis(gp, _leftTriggerProp);
-            return kb || (lt >= triggerThreshold);
+            float rt = ReadAxis(gp, _rightTriggerProp);
+            return kb || (rt >= triggerThreshold);
         }
 
         public static bool IsP2AttachPressedNow(bool useGamepad, int index, string kbProp, KeyCode kbFallback)
@@ -3813,9 +3813,9 @@ namespace AWJSplitScreen
             if (!useGamepad) return kb;
 
             var gp = GetGamepadAtIndex(index);
-            float lt = ReadAxis(gp, _leftTriggerProp);
+            float rt = ReadAxis(gp, _rightTriggerProp);
             // Treat trigger as "pressed" when it crosses threshold — callers track edge themselves
-            return kb || (lt >= 0.35f);
+            return kb || (rt >= 0.35f);
         }
 
         public static bool IsP2DeletePressedNow(bool useGamepad, int index, string kbProp, KeyCode kbFallback)
