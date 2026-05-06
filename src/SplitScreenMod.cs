@@ -148,7 +148,7 @@ namespace AWJSplitScreen
             SceneManager.sceneLoaded += (_, __) => MelonCoroutines.Start(DeferredSetup());
 
             LoggerInstance.Msg("AWJ Split Screen + P2 Inject v0.2.2 loaded.");
-            LoggerInstance.Msg("F9 split, F10 orientation | P2 Move: IJKL or Gamepad LStick | P2 Look: N/M or RStickX | P2 Jump: A | P2 Interact: H/X | P2 Web: U/RT shoot, P/RT attach, O/B delete, RightCtrl/RB release.");
+            LoggerInstance.Msg("F9 split, F10 orientation | P2 Move: IJKL or Gamepad LStick | P2 Look: N/M or RStickX | P2 Jump: A | P2 Interact: H/X | P2 Web: U/LT shoot, P/RT attach, O/B delete, RightCtrl/RB release.");
             LoggerInstance.Msg("Tip: If both controllers still move P1, ensure FilterP1FromP2Gamepad=true and P2_GamepadIndex is the second pad (usually 1).");
         }
 
@@ -2788,7 +2788,10 @@ namespace AWJSplitScreen
             if (!SplitScreenMod.FilterP1FromP2Gamepad) return true;
             if (!SplitScreenMod.P2UseGamepad) return true;
 
-            if (InputCompat.IsP2LookActiveNow(SplitScreenMod.P2GamepadIndex, SplitScreenMod.P2Deadzone))
+            // Only block if the callback itself can be proven to originate from P2's gamepad.
+            // The old "P2 stick is active, so suppress P1" heuristic caused false positives
+            // when P1 was using mouse/keyboard while P2 moved the right stick.
+            if (InputCompat.IsCallbackContextFromP2Gamepad(__0, SplitScreenMod.P2GamepadIndex))
             {
                 if (SplitScreenMod.DebugCameraInput)
                     MelonLogger.Msg("[CameraMouseLook] Blocked P2 gamepad OnLook.");
@@ -3209,20 +3212,6 @@ namespace AWJSplitScreen
                     }
                 }
             }
-            else if (SplitScreenMod.FilterP1FromP2Gamepad && SplitScreenMod.P2UseGamepad)
-            {
-                var p2ls = InputCompat.GetP2LeftStick(SplitScreenMod.P2GamepadIndex, SplitScreenMod.P2Deadzone);
-                if (p2ls.sqrMagnitude > 0f)
-                {
-                    var p1ls = InputCompat.GetP1LeftStick(SplitScreenMod.P2Deadzone);
-                    if (p1ls.sqrMagnitude < SplitScreenMod.P2Deadzone * SplitScreenMod.P2Deadzone)
-                    {
-                        var fi = SplitScreenMod.BodyMove_MoveInputField;
-                        if (fi != null)
-                            try { fi.SetValue(__instance, Vector2.zero); } catch { }
-                    }
-                }
-            }
         }
 
         public static void NpcWalk_Postfix(object __instance)
@@ -3408,12 +3397,6 @@ namespace AWJSplitScreen
             if (InputCompat.IsCallbackContextFromP2Gamepad(__0, SplitScreenMod.P2GamepadIndex))
             {
                 _callbackBlockedP2++;
-                return false;
-            }
-
-            if (InputCompat.IsP2LookActiveNow(SplitScreenMod.P2GamepadIndex, SplitScreenMod.P2Deadzone))
-            {
-                MaybeDebugLog("callback-path no P2 context; likely polling look path active", sawAnyCallbackArg);
                 return false;
             }
 
@@ -3774,8 +3757,10 @@ namespace AWJSplitScreen
             if (!useGamepad) return kb;
 
             var gp = GetGamepadAtIndex(index);
-            float rt = ReadAxis(gp, _rightTriggerProp);
-            return kb || (rt >= triggerThreshold);
+            // RT is reserved for grapple/attach. Keep shoot on LT so the two systems
+            // cannot fire simultaneously from the same trigger.
+            float lt = ReadAxis(gp, _leftTriggerProp);
+            return kb || (lt >= triggerThreshold);
         }
 
         public static bool IsP2JumpPressedNow(bool useGamepad, int index)
