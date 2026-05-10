@@ -1,0 +1,156 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <AssemblyName>Assembly-CSharp</AssemblyName>
+    <GenerateAssemblyInfo>False</GenerateAssemblyInfo>
+    <TargetFramework>netstandard2.1</TargetFramework>
+  </PropertyGroup>
+  <PropertyGroup>
+    <LangVersion>11.0</LangVersion>
+    <AllowUnsafeBlocks>True</AllowUnsafeBlocks>
+  </PropertyGroup>
+  <PropertyGroup />
+  <ItemGroup />
+  <ItemGroup>
+    <Reference Include="UnityEngine.CoreModule">
+      <HintPath>..\lib\managed\UnityEngine.CoreModule.dll</HintPath>
+    </Reference>
+    <Reference Include="UnityEngine.PhysicsModule">
+      <HintPath>..\lib\managed\UnityEngine.PhysicsModule.dll</HintPath>
+    </Reference>
+    <Reference Include="StylizedWaterForURP">
+      <HintPath>..\lib\managed\StylizedWaterForURP.dll</HintPath>
+    </Reference>
+    <Reference Include="Cinemachine">
+      <HintPath>..\lib\managed\Cinemachine.dll</HintPath>
+    </Reference>
+    <Reference Include="UnityEngine.AnimationModule">
+      <HintPath>..\lib\managed\UnityEngine.AnimationModule.dll</HintPath>
+    </Reference>
+    <Reference Include="UnityEngine.UI">
+      <HintPath>..\lib\managed\UnityEngine.UI.dll</HintPath>
+    </Reference>
+    <Reference Include="Unity.Animation.Rigging">
+      <HintPath>..\lib\managed\Unity.Animation.Rigging.dll</HintPath>
+    </Reference>
+    <Reference Include="Unity.InputSystem">
+      <HintPath>..\lib\managed\Unity.InputSystem.dll</HintPath>
+    </Reference>
+    <Reference Include="MPUIKit">
+      <HintPath>..\lib\managed\MPUIKit.dll</HintPath>
+    </Reference>
+    <Reference Include="UnityEngine.DirectorModule">
+      <HintPath>..\lib\managed\UnityEngine.DirectorModule.dll</HintPath>
+    </Reference>
+    <Reference Include="Unity.TextMeshPro">
+      <HintPath>..\lib\managed\Unity.TextMeshPro.dll</HintPath>
+    </Reference>
+    <Reference Include="Dreamteck.Splines">
+      <HintPath>..\lib\managed\Dreamteck.Splines.dll</HintPath>
+    </Reference>
+    <Reference Include="FMODUnity">
+      <HintPath>..\lib\managed\FMODUnity.dll</HintPath>
+    </Reference>
+    <Reference Include="DOTween">
+      <HintPath>..\lib\managed\DOTween.dll</HintPath>
+    </Reference>
+    <Reference Include="MoreMountains.Tools">
+      <HintPath>..\lib\managed\MoreMountains.Tools.dll</HintPath>
+    </Reference>
+    <Reference Include="UnityEngine.ParticleSystemModule">
+      <HintPath>..\lib\managed\UnityEngine.ParticleSystemModule.dll</HintPath>
+    </Reference>
+    <Reference Include="Unity.Usercentrics">
+      <HintPath>..\lib\managed\Unity.Usercentrics.dll</HintPath>
+    </Reference>
+    <Reference Include="UnityEngine.UnityConsentModule">
+      <HintPath>..\lib\managed\UnityEngine.UnityConsentModule.dll</HintPath>
+    </Reference>
+    <Reference Include="UnityEngine.UnityWebRequestModule">
+      <HintPath>..\lib\managed\UnityEngine.UnityWebRequestModule.dll</HintPath>
+    </Reference>
+    <Reference Include="Unity.Services.CloudCode.GeneratedBindings">
+      <HintPath>..\lib\managed\Unity.Services.CloudCode.GeneratedBindings.dll</HintPath>
+    </Reference>
+    <Reference Include="Unity.Purchasing">
+      <HintPath>..\lib\managed\Unity.Purchasing.dll</HintPath>
+    </Reference>
+    <Reference Include="Unity.Purchasing.SecurityStub">
+      <HintPath>..\lib\managed\Unity.Purchasing.SecurityStub.dll</HintPath>
+    </Reference>
+    <Reference Include="Unity.Services.Economy">
+      <HintPath>..\lib\managed\Unity.Services.Economy.dll</HintPath>
+    </Reference>
+    <Reference Include="Unity.Purchasing.SecurityCore">
+      <HintPath>..\lib\managed\Unity.Purchasing.SecurityCore.dll</HintPath>
+    </Reference>
+    <Reference Include="Unity.Services.Authentication">
+      <HintPath>..\lib\managed\Unity.Services.Authentication.dll</HintPath>
+    </Reference>
+    <Reference Include="Unity.Services.Core">
+      <HintPath>..\lib\managed\Unity.Services.Core.dll</HintPath>
+    </Reference>
+    <Reference Include="Unity.Services.CloudCode">
+      <HintPath>..\lib\managed\Unity.Services.CloudCode.dll</HintPath>
+    </Reference>
+    <Reference Include="Unity.Services.RemoteConfig">
+      <HintPath>..\lib\managed\Unity.Services.RemoteConfig.dll</HintPath>
+    </Reference>
+    <Reference Include="Unity.LevelPlay">
+      <HintPath>..\lib\managed\Unity.LevelPlay.dll</HintPath>
+    </Reference>
+    <Reference Include="Assembly-CSharp-firstpass">
+      <HintPath>..\lib\managed\Assembly-CSharp-firstpass.dll</HintPath>
+    </Reference>
+    <Reference Include="Sirenix.Serialization">
+      <HintPath>..\lib\managed\Sirenix.Serialization.dll</HintPath>
+    </Reference>
+    <Reference Include="UnityEngine.UIModule">
+      <HintPath>..\lib\managed\UnityEngine.UIModule.dll</HintPath>
+    </Reference>
+    <Reference Include="InputIcons">
+      <HintPath>..\lib\managed\InputIcons.dll</HintPath>
+    </Reference>
+    <Reference Include="UnityEngine.VideoModule">
+      <HintPath>..\lib\managed\UnityEngine.VideoModule.dll</HintPath>
+    </Reference>
+    <Reference Include="com.rlabrecque.steamworks.net">
+      <HintPath>..\lib\managed\com.rlabrecque.steamworks.net.dll</HintPath>
+    </Reference>
+    <Reference Include="QFSW.QC">
+      <HintPath>..\lib\managed\QFSW.QC.dll</HintPath>
+    </Reference>
+    <Reference Include="Unity.RenderPipelines.Core.Runtime">
+      <HintPath>..\lib\managed\Unity.RenderPipelines.Core.Runtime.dll</HintPath>
+    </Reference>
+    <Reference Include="Unity.RenderPipelines.Universal.Runtime">
+      <HintPath>..\lib\managed\Unity.RenderPipelines.Universal.Runtime.dll</HintPath>
+    </Reference>
+    <Reference Include="UnityEngine.TerrainModule">
+      <HintPath>..\lib\managed\UnityEngine.TerrainModule.dll</HintPath>
+    </Reference>
+    <Reference Include="UnityEngine.InputLegacyModule">
+      <HintPath>..\lib\managed\UnityEngine.InputLegacyModule.dll</HintPath>
+    </Reference>
+    <Reference Include="Sirenix.Utilities">
+      <HintPath>..\lib\managed\Sirenix.Utilities.dll</HintPath>
+    </Reference>
+    <Reference Include="Unity.Purchasing.Utilities">
+      <HintPath>..\lib\managed\Unity.Purchasing.Utilities.dll</HintPath>
+    </Reference>
+    <Reference Include="Newtonsoft.Json">
+      <HintPath>..\lib\managed\Newtonsoft.Json.dll</HintPath>
+    </Reference>
+    <Reference Include="Tayx.Graphy">
+      <HintPath>..\lib\managed\Tayx.Graphy.dll</HintPath>
+    </Reference>
+    <Reference Include="UnityEngine.IMGUIModule">
+      <HintPath>..\lib\managed\UnityEngine.IMGUIModule.dll</HintPath>
+    </Reference>
+    <Reference Include="Unity.Services.Core.Environments">
+      <HintPath>..\lib\managed\Unity.Services.Core.Environments.dll</HintPath>
+    </Reference>
+    <Reference Include="websocket-sharp">
+      <HintPath>..\lib\managed\websocket-sharp.dll</HintPath>
+    </Reference>
+  </ItemGroup>
+</Project>

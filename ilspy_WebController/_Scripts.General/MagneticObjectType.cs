@@ -1,0 +1,37 @@
+namespace _Scripts.General;
+
+public enum MagneticObjectType
+{
+	None,
+	Toast,
+	PowerPlug,
+	Egg,
+	Floor,
+	Stairs,
+	StraightWallNoWindows,
+	StraightWallWithDoor,
+	CornerWallWithOneWindow,
+	CornerWallWithTwoWindows,
+	Roof,
+	FloorThin,
+	ChristmasOrnament,
+	ChristmasStar,
+	SlidingPuzzlePiece,
+	PlushieHead,
+	PlushieArm,
+	PlushieLeg,
+	PlushieTail,
+	PlushieEar,
+	Filament,
+	Battery,
+	Star,
+	Shmoop,
+	Dvd,
+	VinylRecord,
+	BookThick,
+	BagOfChips,
+	ChocolateBarFull,
+	PizzaWhole,
+	AquariumFilter,
+	DrainPlug
+}

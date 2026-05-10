@@ -683,6 +683,17 @@ namespace AWJSplitScreen
                 return;
             }
 
+            // Re-anchor any spider-owned transforms that the game parents to external
+            // surfaces while grounded (BodyMovement.targetTransform, LegController.targetLocal).
+            // Unity Instantiate only deep-copies references that live INSIDE the cloned
+            // hierarchy. If targetTransform was reparented to the floor (line 1078 of
+            // BodyMovement.PerformWalking), the clone's field would still point to P1's
+            // targetTransform — both spiders would then share one move-target Transform,
+            // each pulling the other toward themselves whenever they moved.
+            // P1's spider is mid-air → targetTransform.parent == P1.transform → safe to clone.
+            // P1's spider is grounded → targetTransform.parent == surface → must re-anchor.
+            ReanchorSharedTargets(_p1Spider);
+
             _p2Spider = UnityEngine.Object.Instantiate(_p1Spider);
             _p2Spider.name = _p1Spider.name + "_P2";
             _p2Spider.transform.position += new Vector3(3f, 0f, 3f);
@@ -1596,6 +1607,58 @@ namespace AWJSplitScreen
                 if (comp != null)
                     UnityEngine.Object.Destroy(comp);
             }
+        }
+
+        // Pre-clone safety: re-parent transforms the game reassigns to external surfaces
+        // (BodyMovement.targetTransform, LegController.targetLocal) back into the spider
+        // hierarchy so Instantiate deep-copies them instead of leaving the clone pointing
+        // at P1's instance. Without this, P1 and P2 share a movement target while grounded.
+        private static void ReanchorSharedTargets(GameObject p1Spider)
+        {
+            if (p1Spider == null) return;
+            try
+            {
+                ReanchorField(p1Spider, "_Scripts.Spider.BodyMovement", "targetTransform");
+                // NOTE: do NOT reanchor LegController.targetLocal here. The cloned
+                // LegControllers on P2 are destroyed synchronously right after
+                // Instantiate (no Update runs on them), so they can't share P1's
+                // targetLocal long enough to matter — and re-parenting targetLocal
+                // away from the ground freezes P1's legs until the next jump.
+            }
+            catch (Exception ex)
+            {
+                MelonLogger.Warning("[ReanchorSharedTargets] non-fatal: " + ex);
+            }
+        }
+
+        private static void ReanchorField(GameObject p1Spider, string typeName, string fieldName)
+        {
+            var t = AccessTools.TypeByName(typeName);
+            if (t == null) return;
+            var f = t.GetField(fieldName, BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+            if (f == null) return;
+
+            var comps = p1Spider.GetComponentsInChildren(t, true);
+            if (comps == null) return;
+
+            int reanchored = 0;
+            for (int i = 0; i < comps.Length; i++)
+            {
+                var comp = comps[i] as Component;
+                if (comp == null) continue;
+
+                Transform tt = null;
+                try { tt = f.GetValue(comp) as Transform; } catch { }
+                if (tt == null) continue;
+
+                if (!tt.IsChildOf(p1Spider.transform))
+                {
+                    tt.SetParent(comp.transform, worldPositionStays: true);
+                    reanchored++;
+                }
+            }
+            if (reanchored > 0)
+                MelonLogger.Msg("[ReanchorSharedTargets] re-parented " + reanchored + " " + typeName + "." + fieldName + " back into P1 hierarchy before clone.");
         }
 
         private void Teardown()
