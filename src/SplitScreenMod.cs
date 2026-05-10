@@ -478,6 +478,84 @@ namespace AWJSplitScreen
             {
                 LoggerInstance.Warning("Camera.main patch failed (non-fatal): " + ex);
             }
+
+            // CameraController.MainCamera getter — many game systems read this instead of Camera.main.
+            try
+            {
+                var camType = AccessTools.TypeByName("_Scripts.Singletons.CameraController");
+                if (camType != null)
+                {
+                    var mainCamGetter = AccessTools.PropertyGetter(camType, "MainCamera");
+                    if (mainCamGetter == null) mainCamGetter = AccessTools.Method(camType, "get_MainCamera");
+                    if (mainCamGetter != null)
+                    {
+                        h.Patch(mainCamGetter, prefix: new HarmonyMethod(typeof(CameraControllerMainCameraPatches), nameof(CameraControllerMainCameraPatches.MainCamera_Prefix)));
+                        LoggerInstance.Msg("Patched CameraController.MainCamera getter for P2.");
+                    }
+                    else
+                    {
+                        LoggerInstance.Warning("CameraController.MainCamera getter not found.");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                LoggerInstance.Warning("CameraController.MainCamera patch failed (non-fatal): " + ex);
+            }
+
+            // MainWebVisuals event handlers — suppress P1's reaction while in P2 web context.
+            try
+            {
+                var asm = typeof(UnityEngine.GameObject).Assembly; // not the right one
+                Type mwvType = null;
+                try { mwvType = AccessTools.TypeByName("_Scripts.Web.MainWebVisuals"); } catch { }
+                if (mwvType == null)
+                {
+                    foreach (var a in AppDomain.CurrentDomain.GetAssemblies())
+                    {
+                        try
+                        {
+                            var t = a.GetType("_Scripts.Web.MainWebVisuals", false);
+                            if (t != null) { mwvType = t; break; }
+                        }
+                        catch { }
+                    }
+                }
+
+                if (mwvType != null)
+                {
+                    var actMethod = AccessTools.Method(mwvType, "WebController_OnMainWebActivated");
+                    var deactMethod = AccessTools.Method(mwvType, "WebController_OnMainWebDeactivated");
+
+                    if (actMethod != null)
+                    {
+                        h.Patch(actMethod, prefix: new HarmonyMethod(typeof(MainWebVisualsPatches), nameof(MainWebVisualsPatches.OnMainWebActivated_Prefix)));
+                        LoggerInstance.Msg("Patched MainWebVisuals.WebController_OnMainWebActivated.");
+                    }
+                    else
+                    {
+                        LoggerInstance.Warning("MainWebVisuals.WebController_OnMainWebActivated not found.");
+                    }
+
+                    if (deactMethod != null)
+                    {
+                        h.Patch(deactMethod, prefix: new HarmonyMethod(typeof(MainWebVisualsPatches), nameof(MainWebVisualsPatches.OnMainWebDeactivated_Prefix)));
+                        LoggerInstance.Msg("Patched MainWebVisuals.WebController_OnMainWebDeactivated.");
+                    }
+                    else
+                    {
+                        LoggerInstance.Warning("MainWebVisuals.WebController_OnMainWebDeactivated not found.");
+                    }
+                }
+                else
+                {
+                    LoggerInstance.Warning("MainWebVisuals type not found — P1 visuals may bleed into P2 actions.");
+                }
+            }
+            catch (Exception ex)
+            {
+                LoggerInstance.Warning("MainWebVisuals patch failed (non-fatal): " + ex);
+            }
         }
 
         private static FieldInfo FindFieldByName(Type t, string name)
@@ -1728,6 +1806,48 @@ namespace AWJSplitScreen
         private MethodInfo _mShootWeb;      // MobileShootWeb(bool)
         private MethodInfo _mDeleteWeb;     // MobileDeleteWeb()
         private MethodInfo _mCheckForWebTarget; // CheckForWebTarget(float)
+        private MethodInfo _mQuickBuild;        // MobileQuickBuild()
+        private MethodInfo _mFixedAnchor;       // MobileFixedAnchor()
+        private MethodInfo _mMovingAnchor;      // MobileMovingAnchor()
+        private MethodInfo _mDeleteWebReleased; // MobileDeleteWebButtonReleased()
+
+        // Reflection caches for WebController private fields used by the capsule swap.
+        private FieldInfo _fBodyMovement;
+        private FieldInfo _fWebStartPoint;
+        private FieldInfo _fWebMode;          // enum WebMode
+        private FieldInfo _fWebBuildingMode;  // enum WebBuildingMode
+        private FieldInfo _fWebActive;
+        private FieldInfo _fWebTargetActive;
+        private FieldInfo _fWebAnchorActive;
+        private FieldInfo _fSpringJoint;
+        private FieldInfo _fWebTarget;
+        private FieldInfo _fWebAnchor;
+        private FieldInfo _fWebTargetObject;
+        private FieldInfo _fOldWebTargetObject;
+        private FieldInfo _fOldWebTargetObject1;
+        private FieldInfo _fWebAnchorObject;
+        private FieldInfo _fPlayerWebJoint;
+        private FieldInfo _fDeleteWebPressed;
+        private FieldInfo _fDeletePlayerWebsTimer;
+        private FieldInfo _fWebTargetPrefab;
+        private FieldInfo _fWebAnchorPrefab;
+        // CameraController.mainCamera private field — game systems often access this
+        // field directly (Singleton<CameraController>.Instance.mainCamera) bypassing the
+        // MainCamera property, so we must swap the field itself during P2 invocations.
+        private static FieldInfo _fCcMainCamera;
+        private static object _ccInstance;
+
+        // Per-player P2 state hosting
+        private Component _p2BodyMovement;
+        private Transform _p2Root;
+        private Transform _p2WebTargetTr;
+        private Transform _p2WebAnchorTr;
+        private Transform _p2WebStartPoint;
+        private Component _p2PlayerWebJoint;
+        private WcCapsule _p2Capsule;
+        private bool _p2HasWebTarget;
+        private bool _p2HasWebAnchor;
+        private bool _p2HasWebJoint;
 
         private Camera _p2Camera;
         private Transform _p2InputTransform;
@@ -1738,15 +1858,10 @@ namespace AWJSplitScreen
         private float _p2DotScale = 0.5f;
         private float _p2NormalOffset = 0.05f;
 
-        // P2 grapple state
-        private SpringJoint _grappleJoint;
+        // P2 grapple/web visuals (driven by P2's WcCapsule state, not a custom SpringJoint)
         private LineRenderer _grappleLine;
         private LineRenderer _shootLine;   // preview line while shoot button held (mirrors P1's IndicateWeb)
-        private Vector3 _grapplePoint;
-        private bool _grappleActive;
         private float _grappleMaxDist = 50f;
-        private static readonly float GrappleSpring = 500f;
-        private static readonly float GrappleDamper = 15f;
 
         // P1-derived parameters (read via reflection/logging)
         private float _p1MaxDistance = 50f;
@@ -1756,6 +1871,10 @@ namespace AWJSplitScreen
         // Input edge detection
         private bool _shootHeldPrev;
         private bool _attachHeldPrev;
+        private bool _ltPrev;
+        private bool _rbPrev;
+        private bool _lbPrev;
+        private bool _bPrev;
 
         private bool _inited;
         private MelonLogger.Instance _logger;
@@ -1798,6 +1917,10 @@ namespace AWJSplitScreen
 
                 try { CreateTargetDot(); } catch (Exception ex) { logger.Warning("[P2WebManager] CreateTargetDot failed: " + ex); }
                 try { CreateGrappleLine(p2Spider); } catch (Exception ex) { logger.Warning("[P2WebManager] CreateGrappleLine failed: " + ex); }
+
+                // Set up P2-side WebController state (bodyMovement / Root / per-player webTarget+webAnchor / playerWebJoint).
+                try { SetupP2WebState(p2Spider); }
+                catch (Exception ex) { logger.Warning("[P2WebManager] SetupP2WebState failed (non-fatal): " + ex); }
 
                 logger.Msg("[P2WebManager] Initialized." +
                     " | ShootWeb=" + (_mShootWeb != null) +
@@ -2161,14 +2284,430 @@ namespace AWJSplitScreen
                 _mShootWeb = _wcType.GetMethod("MobileShootWeb", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic, null, new Type[] { typeof(bool) }, null);
                 _mDeleteWeb = _wcType.GetMethod("MobileDeleteWeb", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic, null, Type.EmptyTypes, null);
                 _mCheckForWebTarget = _wcType.GetMethod("CheckForWebTarget", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic, null, new Type[] { typeof(float) }, null);
+                _mQuickBuild = _wcType.GetMethod("MobileQuickBuild", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic, null, Type.EmptyTypes, null);
+                _mFixedAnchor = _wcType.GetMethod("MobileFixedAnchor", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic, null, Type.EmptyTypes, null);
+                _mMovingAnchor = _wcType.GetMethod("MobileMovingAnchor", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic, null, Type.EmptyTypes, null);
+                _mDeleteWebReleased = _wcType.GetMethod("MobileDeleteWebButtonReleased", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic, null, Type.EmptyTypes, null);
+
+                // Field reflection caches for the state-capsule swap.
+                _fBodyMovement = TryGetField("bodyMovement");
+                _fWebStartPoint = TryGetField("webStartPoint");
+                _fWebMode = TryGetField("webMode");
+                _fWebBuildingMode = TryGetField("webBuildingMode");
+                _fWebActive = TryGetField("webActive");
+                _fWebTargetActive = TryGetField("webTargetActive");
+                _fWebAnchorActive = TryGetField("webAnchorActive");
+                _fSpringJoint = TryGetField("springJoint");
+                _fWebTarget = TryGetField("webTarget");
+                _fWebAnchor = TryGetField("webAnchor");
+                _fWebTargetObject = TryGetField("webTargetObject");
+                _fOldWebTargetObject = TryGetField("oldWebTargetObject");
+                _fOldWebTargetObject1 = TryGetField("oldWebTargetObject1");
+                _fWebAnchorObject = TryGetField("webAnchorObject");
+                _fPlayerWebJoint = TryGetField("playerWebJoint");
+                _fDeleteWebPressed = TryGetField("deleteWebPressed");
+                _fDeletePlayerWebsTimer = TryGetField("deletePlayerWebsTimer");
+                _fWebTargetPrefab = TryGetField("webTargetPrefab");
+                _fWebAnchorPrefab = TryGetField("webAnchorPrefab");
+
+                // CameraController.mainCamera field + singleton instance for direct field swap.
+                try
+                {
+                    var ccType = AccessTools.TypeByName("_Scripts.Singletons.CameraController");
+                    if (ccType != null)
+                    {
+                        _fCcMainCamera = AccessTools.Field(ccType, "mainCamera");
+                        // Singleton<CameraController>.Instance — resolve via the generic base class.
+                        var singletonType = ccType.BaseType; // Singleton<CameraController>
+                        var instProp = singletonType?.GetProperty("Instance", BindingFlags.Public | BindingFlags.Static)
+                            ?? singletonType?.GetProperty("Instance", BindingFlags.NonPublic | BindingFlags.Static);
+                        if (instProp != null) _ccInstance = instProp.GetValue(null, null);
+                        else
+                        {
+                            var instField = singletonType?.GetField("Instance", BindingFlags.Public | BindingFlags.Static)
+                                ?? singletonType?.GetField("Instance", BindingFlags.NonPublic | BindingFlags.Static);
+                            if (instField != null) _ccInstance = instField.GetValue(null);
+                        }
+                        if (_logger != null)
+                            _logger.Msg("[P2WebManager] CameraController.mainCamera field cached: field=" + (_fCcMainCamera != null) + " inst=" + (_ccInstance != null));
+                    }
+                }
+                catch (Exception ex)
+                {
+                    if (_logger != null) _logger.Warning("[P2WebManager] CameraController.mainCamera cache failed: " + ex.Message);
+                }
 
                 if (_logger != null)
-                    _logger.Msg("[P2WebManager] CacheWebControllerMethods: shoot=" + (_mShootWeb != null) + " delete=" + (_mDeleteWeb != null) + " check=" + (_mCheckForWebTarget != null));
+                    _logger.Msg("[P2WebManager] CacheWebControllerMethods: shoot=" + (_mShootWeb != null)
+                        + " delete=" + (_mDeleteWeb != null)
+                        + " check=" + (_mCheckForWebTarget != null)
+                        + " quickBuild=" + (_mQuickBuild != null)
+                        + " fixedAnchor=" + (_mFixedAnchor != null)
+                        + " movingAnchor=" + (_mMovingAnchor != null)
+                        + " deleteReleased=" + (_mDeleteWebReleased != null)
+                        + " | fields: bm=" + (_fBodyMovement != null)
+                        + " wsp=" + (_fWebStartPoint != null)
+                        + " wm=" + (_fWebMode != null)
+                        + " wbm=" + (_fWebBuildingMode != null)
+                        + " wa=" + (_fWebActive != null)
+                        + " sj=" + (_fSpringJoint != null)
+                        + " wt=" + (_fWebTarget != null)
+                        + " wan=" + (_fWebAnchor != null)
+                        + " pwj=" + (_fPlayerWebJoint != null)
+                        + " wtp=" + (_fWebTargetPrefab != null)
+                        + " wap=" + (_fWebAnchorPrefab != null));
             }
             catch (Exception ex)
             {
                 if (_logger != null)
                     _logger.Warning("[P2WebManager] CacheWebControllerMethods failed: " + ex);
+            }
+        }
+
+        private FieldInfo TryGetField(string name)
+        {
+            try { return _wcType.GetField(name, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic); }
+            catch { return null; }
+        }
+
+        private T GetField<T>(FieldInfo f) where T : class
+        {
+            if (f == null || _p1WebController == null) return null;
+            try { return f.GetValue(_p1WebController) as T; } catch { return null; }
+        }
+
+        private object GetFieldRaw(FieldInfo f)
+        {
+            if (f == null || _p1WebController == null) return null;
+            try { return f.GetValue(_p1WebController); } catch { return null; }
+        }
+
+        private void SetFieldRaw(FieldInfo f, object value)
+        {
+            if (f == null || _p1WebController == null) return;
+            try { f.SetValue(_p1WebController, value); } catch (Exception ex) { if (_logger != null) _logger.Warning("[P2WebManager] SetField " + f.Name + " failed: " + ex.Message); }
+        }
+
+        private void SaveLive(WcCapsule c)
+        {
+            if (c == null || _p1WebController == null) return;
+            try
+            {
+                if (_fBodyMovement != null) c.bodyMovement = _fBodyMovement.GetValue(_p1WebController);
+                if (_fWebStartPoint != null) c.webStartPoint = _fWebStartPoint.GetValue(_p1WebController);
+                if (_fWebMode != null) { var v = _fWebMode.GetValue(_p1WebController); c.webMode = v != null ? Convert.ToInt32(v) : 0; }
+                if (_fWebBuildingMode != null) { var v = _fWebBuildingMode.GetValue(_p1WebController); c.webBuildingMode = v != null ? Convert.ToInt32(v) : 0; }
+                if (_fWebActive != null) c.webActive = (bool)_fWebActive.GetValue(_p1WebController);
+                if (_fWebTargetActive != null) c.webTargetActive = (bool)_fWebTargetActive.GetValue(_p1WebController);
+                if (_fWebAnchorActive != null) c.webAnchorActive = (bool)_fWebAnchorActive.GetValue(_p1WebController);
+                if (_fSpringJoint != null) c.springJoint = _fSpringJoint.GetValue(_p1WebController);
+                if (_fWebTarget != null) c.webTarget = _fWebTarget.GetValue(_p1WebController);
+                if (_fWebAnchor != null) c.webAnchor = _fWebAnchor.GetValue(_p1WebController);
+                if (_fWebTargetObject != null) c.webTargetObject = _fWebTargetObject.GetValue(_p1WebController);
+                if (_fOldWebTargetObject != null) c.oldWebTargetObject = _fOldWebTargetObject.GetValue(_p1WebController);
+                if (_fOldWebTargetObject1 != null) c.oldWebTargetObject1 = _fOldWebTargetObject1.GetValue(_p1WebController);
+                if (_fWebAnchorObject != null) c.webAnchorObject = _fWebAnchorObject.GetValue(_p1WebController);
+                if (_fPlayerWebJoint != null) c.playerWebJoint = _fPlayerWebJoint.GetValue(_p1WebController);
+                if (_fDeleteWebPressed != null) c.deleteWebPressed = (bool)_fDeleteWebPressed.GetValue(_p1WebController);
+                if (_fDeletePlayerWebsTimer != null) c.deletePlayerWebsTimer = (float)_fDeletePlayerWebsTimer.GetValue(_p1WebController);
+            }
+            catch (Exception ex)
+            {
+                if (_logger != null) _logger.Warning("[P2WebManager] SaveLive failed: " + ex);
+            }
+        }
+
+        private void LoadLive(WcCapsule c)
+        {
+            if (c == null || _p1WebController == null) return;
+            try
+            {
+                if (_fBodyMovement != null) _fBodyMovement.SetValue(_p1WebController, c.bodyMovement);
+                if (_fWebStartPoint != null) _fWebStartPoint.SetValue(_p1WebController, c.webStartPoint);
+                if (_fWebMode != null) _fWebMode.SetValue(_p1WebController, Enum.ToObject(_fWebMode.FieldType, c.webMode));
+                if (_fWebBuildingMode != null) _fWebBuildingMode.SetValue(_p1WebController, Enum.ToObject(_fWebBuildingMode.FieldType, c.webBuildingMode));
+                if (_fWebActive != null) _fWebActive.SetValue(_p1WebController, c.webActive);
+                if (_fWebTargetActive != null) _fWebTargetActive.SetValue(_p1WebController, c.webTargetActive);
+                if (_fWebAnchorActive != null) _fWebAnchorActive.SetValue(_p1WebController, c.webAnchorActive);
+                if (_fSpringJoint != null) _fSpringJoint.SetValue(_p1WebController, c.springJoint);
+                if (_fWebTarget != null) _fWebTarget.SetValue(_p1WebController, c.webTarget);
+                if (_fWebAnchor != null) _fWebAnchor.SetValue(_p1WebController, c.webAnchor);
+                if (_fWebTargetObject != null) _fWebTargetObject.SetValue(_p1WebController, c.webTargetObject);
+                if (_fOldWebTargetObject != null) _fOldWebTargetObject.SetValue(_p1WebController, c.oldWebTargetObject);
+                if (_fOldWebTargetObject1 != null) _fOldWebTargetObject1.SetValue(_p1WebController, c.oldWebTargetObject1);
+                if (_fWebAnchorObject != null) _fWebAnchorObject.SetValue(_p1WebController, c.webAnchorObject);
+                if (_fPlayerWebJoint != null) _fPlayerWebJoint.SetValue(_p1WebController, c.playerWebJoint);
+                if (_fDeleteWebPressed != null) _fDeleteWebPressed.SetValue(_p1WebController, c.deleteWebPressed);
+                if (_fDeletePlayerWebsTimer != null) _fDeletePlayerWebsTimer.SetValue(_p1WebController, c.deletePlayerWebsTimer);
+            }
+            catch (Exception ex)
+            {
+                if (_logger != null) _logger.Warning("[P2WebManager] LoadLive failed: " + ex);
+            }
+        }
+
+        private void InvokeAsP2(Action invoke, bool setShootHeld = false, bool refreshTarget = true)
+        {
+            if (_p2Capsule == null || _p1WebController == null) return;
+
+            var savedP1 = new WcCapsule();
+            SaveLive(savedP1);
+            LoadLive(_p2Capsule);
+
+            // Mirror BodyMovement / WebStartPoint into the live state for P2 if available
+            // (LoadLive already copied them from the capsule, which was set up at init time).
+
+            // Swap CameraController.mainCamera field directly so that game code reading
+            // the field (bypassing the patched property) sees the P2 camera.
+            UnityEngine.Camera prevMainCam = null;
+            bool swappedCam = false;
+            if (_fCcMainCamera != null && _ccInstance != null && SplitScreenMod.P2Camera != null)
+            {
+                try
+                {
+                    prevMainCam = _fCcMainCamera.GetValue(_ccInstance) as UnityEngine.Camera;
+                    _fCcMainCamera.SetValue(_ccInstance, SplitScreenMod.P2Camera);
+                    swappedCam = true;
+                }
+                catch (Exception ex)
+                {
+                    if (_logger != null) _logger.Warning("[P2WebManager] mainCamera swap failed: " + ex.Message);
+                }
+            }
+
+            SplitScreenMod.InP2WebContext = true;
+            if (setShootHeld) SplitScreenMod.P2ShootHeld = true;
+
+            try
+            {
+                if (_logger != null && SplitScreenMod.P2Camera != null)
+                {
+                    var ct = SplitScreenMod.P2Camera.transform;
+                    _logger.Msg("[P2WebManager] InvokeAsP2 begin | P2CamPos=" + ct.position + " fwd=" + ct.forward
+                        + " | wcMainCam=" + (UnityEngine.Camera.main != null ? UnityEngine.Camera.main.name : "null"));
+                }
+                if (refreshTarget && _mCheckForWebTarget != null)
+                {
+                    try { _mCheckForWebTarget.Invoke(_p1WebController, new object[] { 1f }); }
+                    catch (Exception ex) { if (_logger != null) _logger.Warning("[P2WebManager] CheckForWebTarget(P2) failed: " + ex.Message); }
+
+                    // Log what the engine selected as the web target after CheckForWebTarget.
+                    if (_logger != null)
+                    {
+                        try
+                        {
+                            var wto = _fWebTargetObject != null ? _fWebTargetObject.GetValue(_p1WebController) as GameObject : null;
+                            var wt  = _fWebTarget != null ? _fWebTarget.GetValue(_p1WebController) as Transform : null;
+                            _logger.Msg("[P2WebManager] After CheckForWebTarget(P2): webTargetObject=" + (wto != null ? wto.name : "null")
+                                + " webTarget.pos=" + (wt != null ? wt.position.ToString() : "null"));
+                        } catch { }
+                    }
+                }
+
+                if (invoke != null)
+                {
+                    try { invoke(); }
+                    catch (Exception ex) { if (_logger != null) _logger.Warning("[P2WebManager] InvokeAsP2 inner failed: " + ex.Message); }
+                }
+            }
+            finally
+            {
+                // Capture P2's mutated state for next time.
+                SaveLive(_p2Capsule);
+                // Restore P1.
+                LoadLive(savedP1);
+                SplitScreenMod.InP2WebContext = false;
+                SplitScreenMod.P2ShootHeld = false;
+                // Restore CameraController.mainCamera field.
+                if (swappedCam && _fCcMainCamera != null && _ccInstance != null)
+                {
+                    try { _fCcMainCamera.SetValue(_ccInstance, prevMainCam); }
+                    catch (Exception ex) { if (_logger != null) _logger.Warning("[P2WebManager] mainCamera restore failed: " + ex.Message); }
+                }
+            }
+        }
+
+        private static void DisableChildRenderers(Transform root)
+        {
+            if (root == null) return;
+            try
+            {
+                var rends = root.GetComponentsInChildren<UnityEngine.Renderer>(true);
+                if (rends != null)
+                    foreach (var r in rends) { try { if (r != null) r.enabled = false; } catch { } }
+            }
+            catch { }
+        }
+
+        // Build P2's per-player WebController state and seed a capsule so InvokeAsP2 can swap it in.
+        private void SetupP2WebState(GameObject p2Spider)
+        {
+            if (p2Spider == null || _p1WebController == null || _wcType == null) return;
+
+            var asm = _wcType.Assembly;
+            Type bodyMovementType = null;
+            try { bodyMovementType = asm.GetType("_Scripts.Spider.BodyMovement", false); } catch { }
+            if (bodyMovementType == null)
+            {
+                try { bodyMovementType = AccessTools.TypeByName("_Scripts.Spider.BodyMovement"); } catch { }
+            }
+
+            // Resolve P2's BodyMovement
+            if (bodyMovementType != null)
+            {
+                try
+                {
+                    var comps = p2Spider.GetComponentsInChildren(bodyMovementType, true);
+                    if (comps != null && comps.Length > 0)
+                        _p2BodyMovement = comps[0] as Component;
+                }
+                catch (Exception ex) { if (_logger != null) _logger.Warning("[P2WebManager] Locate P2 BodyMovement failed: " + ex.Message); }
+            }
+
+            if (_p2BodyMovement != null)
+            {
+                try
+                {
+                    var rootProp = bodyMovementType.GetProperty("Root", BindingFlags.Public | BindingFlags.Instance);
+                    if (rootProp != null) _p2Root = rootProp.GetValue(_p2BodyMovement, null) as Transform;
+                    if (_p2Root == null)
+                    {
+                        var rootField = bodyMovementType.GetField("root", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                        if (rootField != null) _p2Root = rootField.GetValue(_p2BodyMovement) as Transform;
+                    }
+                }
+                catch (Exception ex) { if (_logger != null) _logger.Warning("[P2WebManager] Read P2 Root failed: " + ex.Message); }
+            }
+
+            // Instantiate per-player webTarget / webAnchor (they host SpringJoint at attach time).
+            try
+            {
+                var wcTr = _p1WebController is Component c ? c.transform : null;
+                var targetPrefab = GetFieldRaw(_fWebTargetPrefab) as Transform;
+                if (targetPrefab != null)
+                {
+                    _p2WebTargetTr = UnityEngine.Object.Instantiate(targetPrefab, wcTr);
+                    _p2WebTargetTr.name = "P2_WebTarget";
+                    // Must remain active so SpringJoint physics simulate when AttachWeb
+                    // adds a SpringJoint to this GameObject.
+                    _p2WebTargetTr.gameObject.SetActive(true);
+                    // Hide the prefab's visible target dot (we render our own _targetDot);
+                    // the engine re-enables this GameObject only when its capsule's
+                    // webTargetActive flag is set, which only happens while P2 is aiming.
+                    DisableChildRenderers(_p2WebTargetTr);
+                    _p2HasWebTarget = true;
+                }
+                else if (_logger != null) _logger.Warning("[P2WebManager] webTargetPrefab not found — P2 grapple disabled.");
+
+                var anchorPrefab = GetFieldRaw(_fWebAnchorPrefab) as Transform;
+                if (anchorPrefab != null)
+                {
+                    _p2WebAnchorTr = UnityEngine.Object.Instantiate(anchorPrefab, wcTr);
+                    _p2WebAnchorTr.name = "P2_WebAnchor";
+                    _p2WebAnchorTr.gameObject.SetActive(true);
+                    DisableChildRenderers(_p2WebAnchorTr);
+                    _p2HasWebAnchor = true;
+                }
+                else if (_logger != null) _logger.Warning("[P2WebManager] webAnchorPrefab not found — P2 build disabled.");
+            }
+            catch (Exception ex) { if (_logger != null) _logger.Warning("[P2WebManager] Instantiate P2 webTarget/Anchor failed: " + ex.Message); }
+
+            // Create P2's playerWebJoint component on its body.
+            try
+            {
+                Type webJointType = null;
+                try { webJointType = asm.GetType("_Scripts.Web.WebJoint", false); } catch { }
+                if (webJointType == null)
+                {
+                    try { webJointType = AccessTools.TypeByName("_Scripts.Web.WebJoint"); } catch { }
+                }
+
+                if (webJointType != null && _p2BodyMovement != null)
+                {
+                    _p2PlayerWebJoint = _p2BodyMovement.gameObject.AddComponent(webJointType) as Component;
+                    if (_p2PlayerWebJoint != null)
+                    {
+                        var setupM = webJointType.GetMethod("SetupPlayerWebJoint", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic, null, Type.EmptyTypes, null);
+                        var setAnchorM = webJointType.GetMethod("SetAnchor", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic, null, new Type[] { typeof(Transform) }, null);
+                        try { if (setupM != null) setupM.Invoke(_p2PlayerWebJoint, null); }
+                        catch (Exception ex) { if (_logger != null) _logger.Warning("[P2WebManager] SetupPlayerWebJoint failed: " + ex.Message); }
+                        try { if (setAnchorM != null && _p2Root != null) setAnchorM.Invoke(_p2PlayerWebJoint, new object[] { _p2Root }); }
+                        catch (Exception ex) { if (_logger != null) _logger.Warning("[P2WebManager] SetAnchor failed: " + ex.Message); }
+                        _p2HasWebJoint = true;
+                    }
+                }
+                else if (_logger != null)
+                {
+                    _logger.Warning("[P2WebManager] WebJoint type or P2 BodyMovement missing — P2 won't have a player web joint.");
+                }
+            }
+            catch (Exception ex) { if (_logger != null) _logger.Warning("[P2WebManager] Create P2 playerWebJoint failed: " + ex.Message); }
+
+            // Seed P2's capsule from current live state, then overwrite per-player parts.
+            try
+            {
+                _p2Capsule = new WcCapsule();
+                SaveLive(_p2Capsule);
+
+                if (_p2BodyMovement != null) _p2Capsule.bodyMovement = _p2BodyMovement;
+                if (_p2WebTargetTr != null) _p2Capsule.webTarget = _p2WebTargetTr;
+                if (_p2WebAnchorTr != null) _p2Capsule.webAnchor = _p2WebAnchorTr;
+                if (_p2PlayerWebJoint != null) _p2Capsule.playerWebJoint = _p2PlayerWebJoint;
+
+                // Create a P2-owned webStartPoint Transform parented to P2's input transform.
+                // The cached webStartPoint field is read directly by AttachWeb when wiring up
+                // the SpringJoint, so we must override it per-player (the getter patch alone
+                // doesn't cover that path).
+                try
+                {
+                    if (_p2InputTransform != null)
+                    {
+                        if (_p2WebStartPoint != null)
+                        {
+                            try { UnityEngine.Object.Destroy(_p2WebStartPoint.gameObject); } catch { }
+                            _p2WebStartPoint = null;
+                        }
+                        var p2WspGo = new GameObject("P2_WebStartPoint");
+                        p2WspGo.transform.SetParent(_p2InputTransform, false);
+                        p2WspGo.transform.localPosition = new Vector3(0f, _webStartHeightOffset, 0f);
+                        p2WspGo.transform.localRotation = Quaternion.identity;
+                        _p2WebStartPoint = p2WspGo.transform;
+                        _p2Capsule.webStartPoint = _p2WebStartPoint;
+                    }
+                    else if (_logger != null)
+                    {
+                        _logger.Warning("[P2WebManager] _p2InputTransform null — cannot create P2 webStartPoint; webs may render from P1.");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    if (_logger != null) _logger.Warning("[P2WebManager] Create P2 webStartPoint failed: " + ex.Message);
+                }
+
+                // P2 starts with no active web/joint.
+                _p2Capsule.webActive = false;
+                _p2Capsule.webTargetActive = false;
+                _p2Capsule.webAnchorActive = false;
+                _p2Capsule.springJoint = null;
+                _p2Capsule.webMode = 0;          // WebMode.Default
+                _p2Capsule.webBuildingMode = 0;  // WebBuildingMode.MovingAnchor
+                _p2Capsule.deleteWebPressed = false;
+                _p2Capsule.deletePlayerWebsTimer = 0f;
+                _p2Capsule.webTargetObject = null;
+                _p2Capsule.oldWebTargetObject = null;
+                _p2Capsule.oldWebTargetObject1 = null;
+                _p2Capsule.webAnchorObject = null;
+
+                if (_logger != null)
+                    _logger.Msg("[P2WebManager] P2 web state ready. bm=" + (_p2BodyMovement != null)
+                        + " root=" + (_p2Root != null)
+                        + " wt=" + _p2HasWebTarget
+                        + " wa=" + _p2HasWebAnchor
+                        + " wj=" + _p2HasWebJoint);
+            }
+            catch (Exception ex)
+            {
+                if (_logger != null) _logger.Warning("[P2WebManager] Seed P2 capsule failed: " + ex);
             }
         }
 
@@ -2189,37 +2728,39 @@ namespace AWJSplitScreen
 
             try
             {
-                // --- Read P2 input ---
-                bool shootHeld = InputCompat.IsP2ShootHeldNow(
+                // --- Read P2 inputs (gamepad-only; keyboard fallbacks intentionally disabled) ---
+                bool rtHeld = InputCompat.IsP2ShootRTHeldNow(
                     SplitScreenMod.P2UseGamepad,
                     SplitScreenMod.P2GamepadIndex,
                     SplitScreenMod.P2TriggerThreshold,
-                    "uKey", KeyCode.U);
-                bool shootDown = shootHeld && !_shootHeldPrev;
-                bool shootUp   = !shootHeld && _shootHeldPrev;
-                _shootHeldPrev = shootHeld;
+                    null, KeyCode.None);
+                bool rtDown = rtHeld && !_shootHeldPrev;
+                bool rtUp   = !rtHeld && _shootHeldPrev;
+                _shootHeldPrev = rtHeld;
 
-                // Trigger attach uses hysteresis: higher threshold to start, lower to release
-                // This prevents rapid on/off flickering when the trigger hovers near threshold
-                float attachThresh = _attachHeldPrev ? (SplitScreenMod.P2TriggerThreshold * 0.5f) : SplitScreenMod.P2TriggerThreshold;
-                bool attachHeld = InputCompat.IsP2AttachHeldNow(
+                bool ltHeld = InputCompat.IsP2QuickBuildHeldNow(
                     SplitScreenMod.P2UseGamepad,
                     SplitScreenMod.P2GamepadIndex,
-                    attachThresh,
-                    "pKey", KeyCode.P);
-                bool attachDown = attachHeld && !_attachHeldPrev;
-                bool attachUp  = !attachHeld && _attachHeldPrev;
-                _attachHeldPrev = attachHeld;
+                    SplitScreenMod.P2TriggerThreshold,
+                    null, KeyCode.None);
+                bool ltDown = ltHeld && !_ltPrev;
+                _ltPrev = ltHeld;
 
-                bool delDown = InputCompat.IsP2DeletePressedNow(
-                    SplitScreenMod.P2UseGamepad,
-                    SplitScreenMod.P2GamepadIndex,
-                    "oKey", KeyCode.O);
+                bool rbHeld = InputCompat.IsP2FixedAnchorHeldNow(
+                    SplitScreenMod.P2UseGamepad, SplitScreenMod.P2GamepadIndex, null, KeyCode.None);
+                bool rbDown = rbHeld && !_rbPrev;
+                _rbPrev = rbHeld;
 
-                bool releaseDown = InputCompat.IsP2ReleasePressedNow(
-                    SplitScreenMod.P2UseGamepad,
-                    SplitScreenMod.P2GamepadIndex,
-                    "rightCtrlKey", KeyCode.RightControl);
+                bool lbHeld = InputCompat.IsP2MovingAnchorHeldNow(
+                    SplitScreenMod.P2UseGamepad, SplitScreenMod.P2GamepadIndex, null, KeyCode.None);
+                bool lbDown = lbHeld && !_lbPrev;
+                _lbPrev = lbHeld;
+
+                bool bHeld = InputCompat.IsP2DeleteHeldNow(
+                    SplitScreenMod.P2UseGamepad, SplitScreenMod.P2GamepadIndex, null, KeyCode.None);
+                bool bDown = bHeld && !_bPrev;
+                bool bUp   = !bHeld && _bPrev;
+                _bPrev = bHeld;
 
                 // --- Periodic debug dump ---
                 if (Time.unscaledTime >= _nextDebugLog)
@@ -2227,63 +2768,53 @@ namespace AWJSplitScreen
                     _nextDebugLog = Time.unscaledTime + 2f;
                     if (_logger != null)
                         _logger.Msg("[P2WebManager] TICK #" + _driveCallCount +
-                            " | shootHeld=" + shootHeld + " attachHeld=" + attachHeld +
-                            " | cam=" + (_p2Camera != null) + " rb=" + (_p2Rigidbody != null) +
-                            " | dot=" + (_p2TargetDot != null ? _p2TargetDot.activeSelf.ToString() : "NULL") +
-                            " | grapple=" + _grappleActive + " joint=" + (_grappleJoint != null) +
-                            " | line=" + (_grappleLine != null ? _grappleLine.enabled.ToString() : "NULL"));
+                            " | RT=" + rtHeld + " LT=" + ltHeld + " RB=" + rbHeld + " LB=" + lbHeld + " B=" + bHeld +
+                            " | webActive=" + (_p2Capsule != null ? _p2Capsule.webActive.ToString() : "?") +
+                            " | sj=" + (_p2Capsule != null && _p2Capsule.springJoint != null) +
+                            " | cam=" + (_p2Camera != null) +
+                            " | dot=" + (_p2TargetDot != null ? _p2TargetDot.activeSelf.ToString() : "NULL"));
                 }
 
                 // --- Target dot (always visible, like P1's) ---
                 UpdateTargetDot(true);
 
-                // --- Shoot/Delete web via P1's WebController with P2 context ---
-                if (shootDown || shootUp || delDown)
+                // --- Drive native WebController via state-capsule swap ---
+                if (rtDown && _mShootWeb != null)
                 {
-                    if (_logger != null)
-                        _logger.Msg("[P2WebManager] WEB ACTION: shootDown=" + shootDown + " shootUp=" + shootUp + " delDown=" + delDown);
-
-                    SplitScreenMod.InP2WebContext = true;
-                    SplitScreenMod.P2ShootHeld = true;
-                    try
-                    {
-                        if (shootHeld && _mCheckForWebTarget != null)
-                            _mCheckForWebTarget.Invoke(_p1WebController, new object[] { 1f });
-
-                        if (shootDown && _mShootWeb != null)
-                            _mShootWeb.Invoke(_p1WebController, new object[] { true });
-                        if (shootUp && _mShootWeb != null)
-                            _mShootWeb.Invoke(_p1WebController, new object[] { false });
-
-                        if (delDown && _mDeleteWeb != null)
-                            _mDeleteWeb.Invoke(_p1WebController, null);
-                    }
-                    finally
-                    {
-                        SplitScreenMod.InP2WebContext = false;
-                        SplitScreenMod.P2ShootHeld = false;
-                    }
+                    InvokeAsP2(() => _mShootWeb.Invoke(_p1WebController, new object[] { true }), setShootHeld: true);
+                }
+                if (rtUp && _mShootWeb != null)
+                {
+                    bool guarded = _p2Capsule != null && _p2Capsule.webActive;
+                    if (guarded)
+                        InvokeAsP2(() => _mShootWeb.Invoke(_p1WebController, new object[] { false }), setShootHeld: false, refreshTarget: false);
                 }
 
-                // --- Grapple (attach/release) handled directly on P2's rigidbody ---
-                if (attachDown)
+                if (ltDown && _mQuickBuild != null)
                 {
-                    if (_logger != null)
-                        _logger.Msg("[P2WebManager] GRAPPLE ATTACH triggered");
-                    TryStartGrapple();
+                    InvokeAsP2(() => _mQuickBuild.Invoke(_p1WebController, null));
                 }
-
-                if (attachUp || releaseDown)
+                if (rbDown && _mFixedAnchor != null)
                 {
-                    if (_logger != null)
-                        _logger.Msg("[P2WebManager] GRAPPLE RELEASE: attachUp=" + attachUp + " releaseDown=" + releaseDown);
-                    StopGrapple();
+                    InvokeAsP2(() => _mFixedAnchor.Invoke(_p1WebController, null), refreshTarget: false);
+                }
+                if (lbDown && _mMovingAnchor != null)
+                {
+                    InvokeAsP2(() => _mMovingAnchor.Invoke(_p1WebController, null), refreshTarget: false);
+                }
+                if (bDown && _mDeleteWeb != null)
+                {
+                    InvokeAsP2(() => _mDeleteWeb.Invoke(_p1WebController, null), refreshTarget: false);
+                }
+                if (bUp && _mDeleteWebReleased != null)
+                {
+                    InvokeAsP2(() => _mDeleteWebReleased.Invoke(_p1WebController, null), refreshTarget: false);
                 }
 
                 // Update shoot preview line (visible while holding shoot, like P1's IndicateWeb)
-                UpdateShootLine(shootHeld);
+                UpdateShootLine(rtHeld);
 
-                // Update grapple line visual
+                // Update grapple line visual (driven by P2's capsule state)
                 UpdateGrappleLine();
             }
             catch (Exception ex)
@@ -2309,9 +2840,15 @@ namespace AWJSplitScreen
                 return;
             }
 
-            var startPos = _p2InputTransform != null
-                ? _p2InputTransform.position + Vector3.up * _webStartHeightOffset
-                : (_p2Rigidbody != null ? _p2Rigidbody.position : _p2Camera.transform.position);
+            Vector3 startPos;
+            if (_p2WebStartPoint != null)
+                startPos = _p2WebStartPoint.position;
+            else if (_p2InputTransform != null)
+                startPos = _p2InputTransform.position + Vector3.up * _webStartHeightOffset;
+            else if (_p2Rigidbody != null)
+                startPos = _p2Rigidbody.position;
+            else
+                startPos = _p2Camera.transform.position;
 
             // Ray from camera center — same origin as target dot, so line always ends exactly on the dot
             var ray = new Ray(_p2Camera.transform.position, _p2Camera.transform.forward);
@@ -2349,122 +2886,92 @@ namespace AWJSplitScreen
             }
         }
 
-        private void TryStartGrapple()
-        {
-            if (_p2Rigidbody == null || _p2Camera == null)
-            {
-                if (_logger != null)
-                    _logger.Warning("[P2WebManager] TryStartGrapple FAILED: rb=" + (_p2Rigidbody != null) + " cam=" + (_p2Camera != null));
-                return;
-            }
-
-            var ray = BuildP2Ray();
-            RaycastHit hit;
-
-            if (!Physics.Raycast(ray, out hit, _grappleMaxDist))
-            {
-                if (_logger != null)
-                    _logger.Msg("[P2WebManager] TryStartGrapple: no raycast hit from " + ray.origin + " dir " + ray.direction);
-                return;
-            }
-
-            // Lazy retry: if we didn't find a web material at init, try again now
-            if (!_webLineMatCached)
-                TryCopyWebLineMaterial();
-
-            _grapplePoint = hit.point;
-            _grappleActive = true;
-
-            // Remove existing joint if any
-            if (_grappleJoint != null)
-                UnityEngine.Object.Destroy(_grappleJoint);
-
-            _grappleJoint = _p2Rigidbody.gameObject.AddComponent<SpringJoint>();
-            _grappleJoint.autoConfigureConnectedAnchor = false;
-            _grappleJoint.anchor = Vector3.zero;
-
-            // If the hit object has a Rigidbody, connect to it (enables two-way pull / tugging physics objects)
-            var hitRb = hit.collider != null ? hit.collider.attachedRigidbody : null;
-            if (hitRb != null)
-            {
-                _grappleJoint.connectedBody = hitRb;
-                // Convert hit point to the target's local space for the connected anchor
-                _grappleJoint.connectedAnchor = hitRb.transform.InverseTransformPoint(_grapplePoint);
-            }
-            else
-            {
-                _grappleJoint.connectedAnchor = _grapplePoint;
-            }
-
-            float dist = Vector3.Distance(_p2Rigidbody.position, _grapplePoint);
-            _grappleJoint.maxDistance = dist * 0.8f;
-            _grappleJoint.minDistance = 0f;
-            _grappleJoint.spring = GrappleSpring;
-            _grappleJoint.damper = GrappleDamper;
-            _grappleJoint.breakForce = Mathf.Infinity;
-            _grappleJoint.tolerance = 0.01f;
-
-            if (_logger != null)
-                _logger.Msg("[P2WebManager] Grapple CREATED: point=" + _grapplePoint +
-                    " dist=" + dist.ToString("F1") +
-                    " rbPos=" + _p2Rigidbody.position +
-                    " rbGO=" + _p2Rigidbody.gameObject.name +
-                    " hitRb=" + (hitRb != null ? hitRb.gameObject.name : "null") +
-                    " joint=" + (_grappleJoint != null));
-        }
-
-        private void StopGrapple()
-        {
-            if (_grappleJoint != null)
-            {
-                UnityEngine.Object.Destroy(_grappleJoint);
-                _grappleJoint = null;
-            }
-            _grappleActive = false;
-
-            if (_grappleLine != null)
-                _grappleLine.enabled = false;
-        }
-
-        private Ray BuildP2Ray()
-        {
-            // Use the same camera-center ray as the target dot so the grapple fires
-            // exactly where the dot is pointing. This ensures visual consistency.
-            return new Ray(_p2Camera.transform.position, _p2Camera.transform.forward);
-        }
-
         private void UpdateGrappleLine()
         {
             if (_grappleLine == null) return;
 
-            if (!_grappleActive || _grappleJoint == null || _p2Rigidbody == null)
+            // Driven by P2's capsule state — show line only when P2 has an active web with a spring joint.
+            bool active = _p2Capsule != null && _p2Capsule.webActive && _p2Capsule.springJoint != null;
+            if (!active)
             {
                 _grappleLine.enabled = false;
                 return;
             }
 
+            // Lazy material copy — web materials may not exist at init time
+            if (!_webLineMatCached)
+                TryCopyWebLineMaterial();
+
             _grappleLine.enabled = true;
 
-            // Start from P2's body (InputTransform), not rigidbody center
-            var startPos = _p2InputTransform != null
-                ? _p2InputTransform.position + Vector3.up * _webStartHeightOffset
-                : _p2Rigidbody.position;
-
-            // End at connected body (tracks moving targets) or fixed point
-            Vector3 endPos;
-            if (_grappleJoint != null && _grappleJoint.connectedBody != null)
-                endPos = _grappleJoint.connectedBody.transform.TransformPoint(_grappleJoint.connectedAnchor);
+            // Start: P2's dedicated web start point — fall back to InputTransform offset, then root.
+            Vector3 startPos;
+            if (_p2WebStartPoint != null)
+                startPos = _p2WebStartPoint.position;
+            else if (_p2InputTransform != null)
+                startPos = _p2InputTransform.position + Vector3.up * _webStartHeightOffset;
+            else if (_p2Root != null)
+                startPos = _p2Root.position;
+            else if (_p2Rigidbody != null)
+                startPos = _p2Rigidbody.position;
             else
-                endPos = _grapplePoint;
+                startPos = transform.position;
 
-            // Straight line between start and end — matches P1's web visual
+            // End: P2's webTarget transform (set by CheckForWebTarget when the joint was attached).
+            Vector3 endPos = startPos;
+            try
+            {
+                if (_p2WebTargetTr != null)
+                    endPos = _p2WebTargetTr.position;
+                else if (_p2Capsule.springJoint is SpringJoint sj && sj != null)
+                {
+                    if (sj.connectedBody != null)
+                        endPos = sj.connectedBody.transform.TransformPoint(sj.connectedAnchor);
+                    else
+                        endPos = sj.connectedAnchor;
+                }
+            }
+            catch { }
+
             _grappleLine.SetPosition(0, startPos);
             _grappleLine.SetPosition(1, endPos);
         }
 
         public void Cleanup()
         {
-            StopGrapple();
+            // Try to release any active P2 web cleanly via the game's own logic.
+            try
+            {
+                if (_p2Capsule != null && _p2Capsule.webActive && _mShootWeb != null)
+                {
+                    InvokeAsP2(() => _mShootWeb.Invoke(_p1WebController, new object[] { false }), setShootHeld: false, refreshTarget: false);
+                }
+            }
+            catch (Exception ex)
+            {
+                if (_logger != null) _logger.Warning("[P2WebManager] Cleanup release-web failed: " + ex.Message);
+            }
+
+            if (_p2WebTargetTr != null)
+            {
+                try { UnityEngine.Object.Destroy(_p2WebTargetTr.gameObject); } catch { }
+                _p2WebTargetTr = null;
+            }
+            if (_p2WebAnchorTr != null)
+            {
+                try { UnityEngine.Object.Destroy(_p2WebAnchorTr.gameObject); } catch { }
+                _p2WebAnchorTr = null;
+            }
+            if (_p2PlayerWebJoint != null)
+            {
+                try { UnityEngine.Object.Destroy(_p2PlayerWebJoint); } catch { }
+                _p2PlayerWebJoint = null;
+            }
+            if (_p2WebStartPoint != null)
+            {
+                try { UnityEngine.Object.Destroy(_p2WebStartPoint.gameObject); } catch { }
+                _p2WebStartPoint = null;
+            }
 
             if (_p2TargetDot != null)
             {
@@ -2491,6 +2998,29 @@ namespace AWJSplitScreen
         private void OnDestroy()
         {
             Cleanup();
+        }
+
+        // Per-player snapshot of WebController's private state. Used to swap state
+        // around each P2 input event so P1 and P2 can run web actions simultaneously.
+        private sealed class WcCapsule
+        {
+            public object bodyMovement;
+            public object webStartPoint;
+            public int webMode;          // WebMode enum
+            public int webBuildingMode;  // WebBuildingMode enum (0=MovingAnchor, 1=FixedAnchor)
+            public bool webActive;
+            public bool webTargetActive;
+            public bool webAnchorActive;
+            public object springJoint;
+            public object webTarget;
+            public object webAnchor;
+            public object webTargetObject;
+            public object oldWebTargetObject;
+            public object oldWebTargetObject1;
+            public object webAnchorObject;
+            public object playerWebJoint;
+            public bool deleteWebPressed;
+            public float deletePlayerWebsTimer;
         }
 
         private static MethodInfo FindMethod_Bool(Type t, string name)
@@ -3508,6 +4038,39 @@ namespace AWJSplitScreen
         }
     }
 
+    // Redirect CameraController.MainCamera to P2's camera while in P2 web context.
+    internal static class CameraControllerMainCameraPatches
+    {
+        private static int _p2Hits;
+        public static bool MainCamera_Prefix(ref Camera __result)
+        {
+            if (!(SplitScreenMod.P2ShootHeld || SplitScreenMod.InP2WebContext)) return true;
+            if (SplitScreenMod.P2Camera == null) return true;
+            __result = SplitScreenMod.P2Camera;
+            if (_p2Hits < 5)
+            {
+                _p2Hits++;
+                MelonLogger.Msg("[CameraControllerMainCamera_Prefix] redirected to P2 cam (#" + _p2Hits + ") name=" + SplitScreenMod.P2Camera.name);
+            }
+            return false;
+        }
+    }
+
+    // While invoking WebController methods on behalf of P2, suppress P1's MainWebVisuals
+    // event handlers so they don't draw a line from P1's body to P2's web target.
+    internal static class MainWebVisualsPatches
+    {
+        public static bool OnMainWebActivated_Prefix()
+        {
+            return !SplitScreenMod.InP2WebContext;
+        }
+
+        public static bool OnMainWebDeactivated_Prefix()
+        {
+            return !SplitScreenMod.InP2WebContext;
+        }
+    }
+
     internal static class InputCompat
     {
         private static bool _inited;
@@ -3884,6 +4447,79 @@ namespace AWJSplitScreen
             var gp = GetGamepadAtIndex(index);
             bool rb = ReadButtonDown(gp, _rightShoulderProp);
             return kb || rb;
+        }
+
+        // === New helpers for full P2 web abilities (Option B). All return "held" booleans;
+        // callers track press/release edges. kbProp may be null to skip keyboard fallback. ===
+
+        // RT (right trigger) → shoot/grapple (held)
+        public static bool IsP2ShootRTHeldNow(bool useGamepad, int index, float triggerThreshold, string kbProp, KeyCode kbFallback)
+        {
+            bool kb = !string.IsNullOrEmpty(kbProp) && Held(kbProp, kbFallback);
+            if (!useGamepad) return kb || (kbFallback != KeyCode.None && SafeKey(kbFallback));
+            var gp = GetGamepadAtIndex(index);
+            float rt = ReadAxis(gp, _rightTriggerProp);
+            return kb || (rt >= triggerThreshold);
+        }
+
+        // LT (left trigger) → quick build (held)
+        public static bool IsP2QuickBuildHeldNow(bool useGamepad, int index, float triggerThreshold, string kbProp, KeyCode kbFallback)
+        {
+            bool kb = !string.IsNullOrEmpty(kbProp) && Held(kbProp, kbFallback);
+            if (!useGamepad) return kb || (kbFallback != KeyCode.None && SafeKey(kbFallback));
+            var gp = GetGamepadAtIndex(index);
+            float lt = ReadAxis(gp, _leftTriggerProp);
+            return kb || (lt >= triggerThreshold);
+        }
+
+        // RB (right shoulder) → fixed anchor (held)
+        public static bool IsP2FixedAnchorHeldNow(bool useGamepad, int index, string kbProp, KeyCode kbFallback)
+        {
+            bool kb = !string.IsNullOrEmpty(kbProp) && Held(kbProp, kbFallback);
+            if (!useGamepad) return kb || (kbFallback != KeyCode.None && SafeKey(kbFallback));
+            var gp = GetGamepadAtIndex(index);
+            return kb || ReadButtonHeld(gp, _rightShoulderProp);
+        }
+
+        // LB (left shoulder) → moving anchor (held)
+        public static bool IsP2MovingAnchorHeldNow(bool useGamepad, int index, string kbProp, KeyCode kbFallback)
+        {
+            bool kb = !string.IsNullOrEmpty(kbProp) && Held(kbProp, kbFallback);
+            if (!useGamepad) return kb || (kbFallback != KeyCode.None && SafeKey(kbFallback));
+            var gp = GetGamepadAtIndex(index);
+            return kb || ReadButtonHeld(gp, _leftShoulderProp);
+        }
+
+        // B (buttonEast) → delete (held — P2WebManager tracks press/release edges itself)
+        public static bool IsP2DeleteHeldNow(bool useGamepad, int index, string kbProp, KeyCode kbFallback)
+        {
+            bool kb = !string.IsNullOrEmpty(kbProp) && Held(kbProp, kbFallback);
+            if (!useGamepad) return kb || (kbFallback != KeyCode.None && SafeKey(kbFallback));
+            var gp = GetGamepadAtIndex(index);
+            return kb || ReadButtonHeld(gp, _buttonEastProp);
+        }
+
+        private static bool SafeKey(KeyCode k)
+        {
+            try { return UnityEngine.Input.GetKey(k); } catch { return false; }
+        }
+
+        private static bool ReadButtonHeld(object gamepad, PropertyInfo buttonProp)
+        {
+            try
+            {
+                if (gamepad == null || buttonProp == null) return false;
+                var btn = buttonProp.GetValue(gamepad, null);
+                if (btn == null) return false;
+                // ButtonControl.isPressed inherits from InputControl<float>; use AxisControl.ReadValue threshold
+                if (_controlReadValueFloat != null)
+                {
+                    var v = _controlReadValueFloat.Invoke(btn, null);
+                    if (v is float) return ((float)v) >= 0.5f;
+                }
+                return false;
+            }
+            catch { return false; }
         }
 
         public static bool IsCallbackContextFromP2Gamepad(object ctx, int p2Index)
