@@ -627,11 +627,25 @@ namespace AWJSplitScreen
             if (_enabled != null && !_enabled.Value)
                 yield break;
 
+            if (!CanUseSplitScreenInCurrentScene())
+            {
+                if (_enabled != null) _enabled.Value = false;
+                LoggerInstance.Warning("Split-screen is only available in gameplay after PlayerSpider has spawned.");
+                yield break;
+            }
+
             SetupCameras();
             CacheWebController();
 
             if (_spawnSecondSpider != null && _spawnSecondSpider.Value)
                 SetupSecondSpider();
+
+            if (_spawnSecondSpider != null && _spawnSecondSpider.Value && _p2Spider == null)
+            {
+                LoggerInstance.Warning("Split-screen setup aborted because P2 could not be summoned.");
+                if (_enabled != null) _enabled.Value = false;
+                Teardown();
+            }
         }
 
         public override void OnUpdate()
@@ -643,8 +657,16 @@ namespace AWJSplitScreen
                 _enabled.Value = !_enabled.Value;
                 if (_enabled.Value)
                 {
-                    MelonCoroutines.Start(DeferredSetup());
-                    LoggerInstance.Msg("Split-screen enabled.");
+                    if (!CanUseSplitScreenInCurrentScene())
+                    {
+                        _enabled.Value = false;
+                        LoggerInstance.Warning("Split-screen can't be enabled here. Enter gameplay first.");
+                    }
+                    else
+                    {
+                        MelonCoroutines.Start(DeferredSetup());
+                        LoggerInstance.Msg("Split-screen enabled.");
+                    }
                 }
                 else
                 {
@@ -655,11 +677,18 @@ namespace AWJSplitScreen
 
             if (InputCompat.Down_F10())
             {
-                _splitMode.Value = string.Equals(_splitMode.Value, "Vertical", StringComparison.OrdinalIgnoreCase)
-                    ? "Horizontal"
-                    : "Vertical";
-                ApplyCameraRects();
-                LoggerInstance.Msg("Split mode: " + _splitMode.Value);
+                if (_camRightOrBottom == null || _p2Spider == null)
+                {
+                    LoggerInstance.Warning("Can't switch split layout before P2 is summoned.");
+                }
+                else
+                {
+                    _splitMode.Value = string.Equals(_splitMode.Value, "Vertical", StringComparison.OrdinalIgnoreCase)
+                        ? "Horizontal"
+                        : "Vertical";
+                    ApplyCameraRects();
+                    LoggerInstance.Msg("Split mode: " + _splitMode.Value);
+                }
             }
 
             if (_enabled.Value)
@@ -1626,6 +1655,11 @@ namespace AWJSplitScreen
                 }
             }
             return null;
+        }
+
+        private static bool CanUseSplitScreenInCurrentScene()
+        {
+            return FindPlayerSpider() != null;
         }
 
         private static Transform FindChildTransform(Transform root, string name)
