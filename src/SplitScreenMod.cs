@@ -479,7 +479,7 @@ namespace AWJSplitScreen
                 LoggerInstance.Warning("Camera.main patch failed (non-fatal): " + ex);
             }
 
-            // CameraController.MainCamera getter — many game systems read this instead of Camera.main.
+            // CameraController.MainCamera getter / GetCameraDistance() — web targeting reads both.
             try
             {
                 var camType = AccessTools.TypeByName("_Scripts.Singletons.CameraController");
@@ -496,11 +496,22 @@ namespace AWJSplitScreen
                     {
                         LoggerInstance.Warning("CameraController.MainCamera getter not found.");
                     }
+
+                    var getCameraDistance = AccessTools.Method(camType, "GetCameraDistance");
+                    if (getCameraDistance != null)
+                    {
+                        h.Patch(getCameraDistance, prefix: new HarmonyMethod(typeof(CameraControllerMainCameraPatches), nameof(CameraControllerMainCameraPatches.GetCameraDistance_Prefix)));
+                        LoggerInstance.Msg("Patched CameraController.GetCameraDistance for P2.");
+                    }
+                    else
+                    {
+                        LoggerInstance.Warning("CameraController.GetCameraDistance not found.");
+                    }
                 }
             }
             catch (Exception ex)
             {
-                LoggerInstance.Warning("CameraController.MainCamera patch failed (non-fatal): " + ex);
+                LoggerInstance.Warning("CameraController patch failed (non-fatal): " + ex);
             }
 
             // MainWebVisuals event handlers — suppress P1's reaction while in P2 web context.
@@ -4052,6 +4063,22 @@ namespace AWJSplitScreen
                 _p2Hits++;
                 MelonLogger.Msg("[CameraControllerMainCamera_Prefix] redirected to P2 cam (#" + _p2Hits + ") name=" + SplitScreenMod.P2Camera.name);
             }
+            return false;
+        }
+
+        public static bool GetCameraDistance_Prefix(ref float __result)
+        {
+            if (!(SplitScreenMod.P2ShootHeld || SplitScreenMod.InP2WebContext)) return true;
+            if (SplitScreenMod.P2Camera == null) return true;
+
+            var pivot = SplitScreenMod.P2InputTransform;
+            if (pivot != null)
+            {
+                __result = Mathf.Max(Vector3.Distance(pivot.position, SplitScreenMod.P2Camera.transform.position), 0.01f);
+                return false;
+            }
+
+            __result = Mathf.Max(SplitScreenMod.P2CameraDistance, 0.01f);
             return false;
         }
     }
