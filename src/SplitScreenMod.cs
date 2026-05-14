@@ -29,6 +29,8 @@ namespace AWJSplitScreen
         internal static bool InP2WebContext;           // one-shot actions
         internal static Transform P2InputTransform;
         internal static Camera P2Camera;
+        internal static Component P1BodyMovementInstance;
+        internal static Component P2BodyMovementInstance;
 
         internal static FieldInfo BodyMove_MoveInputField;
         internal static FieldInfo BodyMove_MoveVectorField;
@@ -567,6 +569,84 @@ namespace AWJSplitScreen
             {
                 LoggerInstance.Warning("MainWebVisuals patch failed (non-fatal): " + ex);
             }
+
+            // BodyMovement.SetIsUnderwater — original early-returns when !isPlayer, so P2
+            // entering water does nothing. Prefix detects P2's instance and drives our
+            // own underwater counter + tells MusicController to start/stop the
+            // underwater ambience loop based on whether *either* player is underwater.
+            try
+            {
+                var bmType = AccessTools.TypeByName("_Scripts.Spider.BodyMovement");
+                if (bmType != null)
+                {
+                    var setUw = bmType.GetMethod("SetIsUnderwater",
+                        BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+                        null, new Type[] { typeof(bool) }, null);
+                    if (setUw != null)
+                    {
+                        h.Patch(setUw,
+                            prefix: new HarmonyMethod(typeof(BodyMovementUnderwaterPatches),
+                                nameof(BodyMovementUnderwaterPatches.SetIsUnderwater_Prefix)));
+                        LoggerInstance.Msg("Patched BodyMovement.SetIsUnderwater for P2 audio.");
+                    }
+                    BodyMovementUnderwaterPatches.IsUnderwaterField =
+                        bmType.GetField("isUnderwater",
+                            BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                }
+            }
+            catch (Exception ex)
+            {
+                LoggerInstance.Warning("BodyMovement.SetIsUnderwater patch failed (non-fatal): " + ex);
+            }
+
+            // MusicController.StopUnderwater — if P2 is still underwater when P1 exits
+            // water, don't stop the loop. (And vice versa.)
+            try
+            {
+                var mcType = AccessTools.TypeByName("_Scripts.Singletons.MusicController");
+                if (mcType != null)
+                {
+                    var stopUw = mcType.GetMethod("StopUnderwater",
+                        BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+                        null, Type.EmptyTypes, null);
+                    if (stopUw != null)
+                    {
+                        h.Patch(stopUw,
+                            prefix: new HarmonyMethod(typeof(MusicControllerUnderwaterPatches),
+                                nameof(MusicControllerUnderwaterPatches.StopUnderwater_Prefix)));
+                        LoggerInstance.Msg("Patched MusicController.StopUnderwater for split underwater state.");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                LoggerInstance.Warning("MusicController.StopUnderwater patch failed (non-fatal): " + ex);
+            }
+            // WebThread.DeleteWebThread — when a WebThread is about to be destroyed,
+            // detach any P2 transforms (spider, targetTransform) that may be parented
+            // to it. BodyMovement.PerformWalking parents the spider to the surface it
+            // walks on; if that surface is the WebThread being deleted, Unity would
+            // otherwise destroy the P2 spider GameObject with it.
+            try
+            {
+                var wtType = AccessTools.TypeByName("_Scripts.Web.WebThread");
+                if (wtType != null)
+                {
+                    var delMethod = wtType.GetMethod("DeleteWebThread",
+                        BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                    if (delMethod != null)
+                    {
+                        h.Patch(delMethod,
+                            prefix: new HarmonyMethod(typeof(WebThreadDeletePatches),
+                                nameof(WebThreadDeletePatches.DeleteWebThread_Prefix)));
+                        LoggerInstance.Msg("Patched WebThread.DeleteWebThread to detach P2 transforms.");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                LoggerInstance.Warning("WebThread.DeleteWebThread patch failed (non-fatal): " + ex);
+            }
         }
 
         private static FieldInfo FindFieldByName(Type t, string name)
@@ -645,6 +725,51 @@ namespace AWJSplitScreen
                 LoggerInstance.Warning("Split-screen setup aborted because P2 could not be summoned.");
                 if (_enabled != null) _enabled.Value = false;
                 Teardown();
+                yield break;
+            }
+
+            // Allow P2 (layer 2 = Ignore Raycast) into the snow/dust effect cameras'
+            // culling masks so P2 also leaves snow trails / piano dust trails.
+            ApplyP2LayerToGlobalEffectCameras();
+        }
+
+        private void ApplyP2LayerToGlobalEffectCameras()
+        {
+            const int p2LayerMask = 1 << 2; // Ignore Raycast — P2 spider is on this layer.
+            try
+            {
+                var types = new[] {
+                    AccessTools.TypeByName("_Scripts.Miscellaneous.Christmas.SnowController"),
+                    AccessTools.TypeByName("_Scripts.LivingRoom.PianoDust")
+                };
+                foreach (var t in types)
+                {
+                    if (t == null) continue;
+                    var comps = UnityEngine.Object.FindObjectsOfType(t, true);
+                    if (comps == null) continue;
+                    var camFields = t.GetFields(BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+                    foreach (var c in comps)
+                    {
+                        foreach (var fi in camFields)
+                        {
+                            if (fi.FieldType != typeof(Camera)) continue;
+                            try
+                            {
+                                var cam = fi.GetValue(c) as Camera;
+                                if (cam != null && (cam.cullingMask & p2LayerMask) == 0)
+                                {
+                                    cam.cullingMask |= p2LayerMask;
+                                    LoggerInstance.Msg("Added P2 layer to " + t.Name + "." + fi.Name + " cullingMask.");
+                                }
+                            }
+                            catch { }
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                LoggerInstance.Warning("ApplyP2LayerToGlobalEffectCameras failed (non-fatal): " + ex);
             }
         }
 
@@ -1431,6 +1556,20 @@ namespace AWJSplitScreen
                     if (bmType != null)
                     {
                         _p2BodyMovement = _p2Spider.GetComponentInChildren(bmType, true) as Component;
+                        P2BodyMovementInstance = _p2BodyMovement;
+                        if (P1BodyMovementInstance == null)
+                        {
+                            var p1bms = UnityEngine.Object.FindObjectsOfType(bmType, true);
+                            for (int i = 0; i < (p1bms != null ? p1bms.Length : 0); i++)
+                            {
+                                var c = p1bms[i] as Component;
+                                if (c != null && !object.ReferenceEquals(c, _p2BodyMovement))
+                                {
+                                    P1BodyMovementInstance = c;
+                                    break;
+                                }
+                            }
+                        }
                         const BindingFlags F = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
                         _bmRbProp = bmType.GetProperty("Rb", F);
                         _bmStateProp = bmType.GetProperty("State", F);
@@ -1818,6 +1957,8 @@ namespace AWJSplitScreen
             _p2SelfColliders = null;
             _p2SelfColliderRefreshFrame = -1;
             _p2BodyMovement = null;
+            P2BodyMovementInstance = null;
+            // Note: P1BodyMovementInstance intentionally retained — P1 persists across toggles.
             _bmRbProp = null;
             _bmStateProp = null;
             _bmWebTouchedProp = null;
@@ -1830,6 +1971,7 @@ namespace AWJSplitScreen
             InP2WebContext = false;
             P2ShootHeld = false;
             P2JumpPressed = false;
+            BodyMovementUnderwaterPatches.Reset();
         }
     }
 
@@ -1920,6 +2062,14 @@ namespace AWJSplitScreen
         private bool _rbPrev;
         private bool _lbPrev;
         private bool _bPrev;
+
+        // Hold-to-delete-all simulation (because WebController.Update only ticks P1's
+        // capsule; P2's deletePlayerWebsTimer never advances naturally). Game uses 1f
+        // hold; we mirror that here and invoke DestroyAllPlayerWebs once when reached.
+        private float _p2DeleteHoldTimer;
+        private bool _p2DeleteAllFired;
+        private const float P2_DELETE_HOLD_DURATION = 1f;
+        private MethodInfo _mDestroyAllPlayerWebs;
 
         private bool _inited;
         private MelonLogger.Instance _logger;
@@ -2333,6 +2483,7 @@ namespace AWJSplitScreen
                 _mFixedAnchor = _wcType.GetMethod("MobileFixedAnchor", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic, null, Type.EmptyTypes, null);
                 _mMovingAnchor = _wcType.GetMethod("MobileMovingAnchor", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic, null, Type.EmptyTypes, null);
                 _mDeleteWebReleased = _wcType.GetMethod("MobileDeleteWebButtonReleased", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic, null, Type.EmptyTypes, null);
+                _mDestroyAllPlayerWebs = _wcType.GetMethod("DestroyAllPlayerWebs", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic, null, Type.EmptyTypes, null);
 
                 // Field reflection caches for the state-capsule swap.
                 _fBodyMovement = TryGetField("bodyMovement");
@@ -2820,8 +2971,20 @@ namespace AWJSplitScreen
                             " | dot=" + (_p2TargetDot != null ? _p2TargetDot.activeSelf.ToString() : "NULL"));
                 }
 
+                // --- Refresh P2's web target each frame so the dot snaps to webbable surfaces
+                // exactly like P1's reticle. This swaps state for one CheckForWebTarget call.
+                if (_mCheckForWebTarget != null)
+                {
+                    InvokeAsP2(null, refreshTarget: true);
+                }
+
                 // --- Target dot (always visible, like P1's) ---
                 UpdateTargetDot(true);
+
+                // --- Hold-to-delete-all-webs simulation (P2's capsule timer can't tick
+                // between input events because P2 state is only loaded transiently;
+                // simulate it here and fire DestroyAllPlayerWebs when the hold completes). ---
+                TickP2DeleteHold(bHeld, bDown, bUp);
 
                 // --- Drive native WebController via state-capsule swap ---
                 if (rtDown && _mShootWeb != null)
@@ -2849,7 +3012,10 @@ namespace AWJSplitScreen
                 }
                 if (bDown && _mDeleteWeb != null)
                 {
-                    InvokeAsP2(() => _mDeleteWeb.Invoke(_p1WebController, null), refreshTarget: false);
+                    // refreshTarget: true so MobileDeleteWeb's CheckForWebThreadToDestroy
+                    // sees the web P2 is currently aiming at (previous behavior used a stale
+                    // capsule and frequently missed the target).
+                    InvokeAsP2(() => _mDeleteWeb.Invoke(_p1WebController, null), refreshTarget: true);
                 }
                 if (bUp && _mDeleteWebReleased != null)
                 {
@@ -2909,12 +3075,54 @@ namespace AWJSplitScreen
             _shootLine.enabled = true;
         }
 
+        private void TickP2DeleteHold(bool bHeld, bool bDown, bool bUp)
+        {
+            if (_mDestroyAllPlayerWebs == null) return;
+
+            if (bDown)
+            {
+                _p2DeleteHoldTimer = 0f;
+                _p2DeleteAllFired = false;
+            }
+            else if (bHeld && !_p2DeleteAllFired)
+            {
+                _p2DeleteHoldTimer += Time.deltaTime;
+                if (_p2DeleteHoldTimer >= P2_DELETE_HOLD_DURATION)
+                {
+                    _p2DeleteAllFired = true;
+                    InvokeAsP2(() => _mDestroyAllPlayerWebs.Invoke(_p1WebController, null), refreshTarget: false);
+                }
+            }
+            else if (bUp || !bHeld)
+            {
+                _p2DeleteHoldTimer = 0f;
+            }
+        }
+
         private void UpdateTargetDot(bool show)
         {
             if (_p2TargetDot == null || _p2Camera == null) return;
 
-            // P1's dot always appears at screen center.
-            // Cast directly from camera in camera.forward direction.
+            // Prefer the engine-resolved web target from CheckForWebTarget (refreshed
+            // each frame via InvokeAsP2). This snaps the dot to webbable surfaces /
+            // WebJoints / WebThreads exactly like P1's reticle, instead of the raw
+            // camera-forward raycast which never snaps.
+            try
+            {
+                if (_p2Capsule != null && _p2Capsule.webTargetActive)
+                {
+                    var webTr = _p2Capsule.webTarget as Transform;
+                    if (webTr != null)
+                    {
+                        _p2TargetDot.SetActive(true);
+                        _p2TargetDot.transform.position = webTr.position;
+                        return;
+                    }
+                }
+            }
+            catch { /* fall through to raw raycast */ }
+
+            // Fallback: raw camera-forward raycast (when nothing webbable is in front).
             // P2's spider is on layer 2 (Ignore Raycast) so the ray passes through it.
             // The dot material has ZTest=Always so it renders on top of everything.
             var ray = new Ray(_p2Camera.transform.position, _p2Camera.transform.forward);
@@ -3236,7 +3444,21 @@ namespace AWJSplitScreen
 
         private void Update()
         {
-            if (!_inited || _target == null || _targetLocal == null) return;
+            if (!_inited || _target == null) return;
+            // If a previous parent surface got destroyed (e.g., SplitWebThread destroyed
+            // a WebThread that was holding this leg target as a child), Unity will have
+            // destroyed _targetLocal with it. Recreate so IK doesn't break for the
+            // life of the session.
+            if (_targetLocal == null)
+            {
+                var tlGo = new GameObject("P2LegTargetLocal_" + gameObject.name);
+                _targetLocal = tlGo.transform;
+                _targetLocal.SetParent(null, false);
+                _targetLocal.position = transform.position - _bodyTransform.up * _scale * 0.5f;
+                _targetLocal.rotation = transform.rotation;
+                _oldTarget = _targetLocal.position;
+                _lerp = 1f;
+            }
             bool jumping = IsBodyJumping();
 
             if (jumping)
@@ -3352,8 +3574,20 @@ namespace AWJSplitScreen
                 _targetLocal.position = hit.point + hit.normal * _tipHeight * _scale;
                 var fwd = Vector3.Cross(transform.right, hit.normal);
                 _targetLocal.rotation = Quaternion.LookRotation(fwd, hit.normal);
-                // Parent to hit surface so feet track moving geometry (webs, platforms)
-                _targetLocal.SetParent(hit.transform, true);
+                // Parent to hit surface so feet track moving geometry (webs, platforms).
+                // EXCEPTION: never parent to a WebThread — they get destroyed/replaced by
+                // SplitWebThread when *either* player builds a new web, and a destroyed
+                // parent takes our leg-target child with it (which breaks IK and makes
+                // the P2 spider visually disappear). Webs barely move anyway, so a
+                // world-space target is fine.
+                if (!IsWebSurface(hit.transform))
+                {
+                    _targetLocal.SetParent(hit.transform, true);
+                }
+                else
+                {
+                    _targetLocal.SetParent(null, true);
+                }
             }
 
             if (_instantReset)
@@ -3415,7 +3649,28 @@ namespace AWJSplitScreen
             _targetLocal.position = hit.point + hit.normal * _tipHeight * _scale;
             var fwd = Vector3.Cross(transform.right, hit.normal);
             _targetLocal.rotation = Quaternion.LookRotation(fwd, hit.normal);
-            _targetLocal.SetParent(hit.transform, true);
+            if (!IsWebSurface(hit.transform))
+                _targetLocal.SetParent(hit.transform, true);
+            else
+                _targetLocal.SetParent(null, true);
+        }
+
+        // Web layers ("Web" and "PlayerWeb") are destroyed/replaced by SplitWebThread,
+        // and Unity destroys child Transforms with them. Avoid parenting to those.
+        private static int _webLayerMask = -1;
+        private static bool IsWebSurface(Transform t)
+        {
+            if (t == null) return false;
+            if (_webLayerMask == -1)
+            {
+                int webLayer = LayerMask.NameToLayer("Web");
+                int playerWebLayer = LayerMask.NameToLayer("PlayerWeb");
+                int m = 0;
+                if (webLayer >= 0) m |= 1 << webLayer;
+                if (playerWebLayer >= 0) m |= 1 << playerWebLayer;
+                _webLayerMask = m;
+            }
+            return ((1 << t.gameObject.layer) & _webLayerMask) != 0;
         }
     }
 
@@ -4129,6 +4384,177 @@ namespace AWJSplitScreen
         public static bool OnMainWebDeactivated_Prefix()
         {
             return !SplitScreenMod.InP2WebContext;
+        }
+    }
+
+    // Drives P2's underwater state. Original BodyMovement.SetIsUnderwater early-returns
+    // when isPlayer==false (which P2 always is), so P2 entering water plays no audio.
+    // The prefix runs custom logic for P2's BodyMovement instance, then lets the
+    // original method continue (it'll early-return). For P1, the prefix is a no-op.
+    internal static class BodyMovementUnderwaterPatches
+    {
+        public static FieldInfo IsUnderwaterField;
+
+        private static int _p2Counter;
+        private static bool _p2Underwater;
+
+        public static bool P2IsUnderwater { get { return _p2Underwater; } }
+
+        public static bool SetIsUnderwater_Prefix(object __instance, bool value)
+        {
+            try
+            {
+                var p2bm = SplitScreenMod.P2BodyMovementInstance;
+                if (p2bm == null || !object.ReferenceEquals(__instance, p2bm))
+                    return true; // not P2 — let original run normally
+
+                // P2's water transition. Mirror the counter logic from the original.
+                _p2Counter += (value ? 1 : -1);
+                if (_p2Counter < 0) _p2Counter = 0;
+
+                if (!_p2Underwater && _p2Counter > 0)
+                {
+                    _p2Underwater = true;
+                    // Only start the ambience if it isn't already running because of P1.
+                    if (!P1IsUnderwater())
+                    {
+                        try
+                        {
+                            var mcType = AccessTools.TypeByName("_Scripts.Singletons.MusicController");
+                            var inst = SingletonInstance(mcType);
+                            if (inst != null)
+                            {
+                                var m = mcType.GetMethod("StartUnderwater",
+                                    BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+                                    null, Type.EmptyTypes, null);
+                                if (m != null) m.Invoke(inst, null);
+                            }
+                        }
+                        catch { }
+                    }
+                }
+                else if (_p2Underwater && _p2Counter == 0)
+                {
+                    _p2Underwater = false;
+                    if (!P1IsUnderwater())
+                    {
+                        try
+                        {
+                            var mcType = AccessTools.TypeByName("_Scripts.Singletons.MusicController");
+                            var inst = SingletonInstance(mcType);
+                            if (inst != null)
+                            {
+                                var m = mcType.GetMethod("StopUnderwater",
+                                    BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+                                    null, Type.EmptyTypes, null);
+                                if (m != null) m.Invoke(inst, null);
+                            }
+                        }
+                        catch { }
+                    }
+                }
+            }
+            catch { }
+            return true; // always let original run; it early-returns for non-player
+        }
+
+        private static bool P1IsUnderwater()
+        {
+            try
+            {
+                var p1bm = SplitScreenMod.P1BodyMovementInstance;
+                if (p1bm == null || IsUnderwaterField == null) return false;
+                var v = IsUnderwaterField.GetValue(p1bm);
+                return v is bool b && b;
+            }
+            catch { return false; }
+        }
+
+        private static object SingletonInstance(Type singletonTargetType)
+        {
+            if (singletonTargetType == null) return null;
+            try
+            {
+                var asm = singletonTargetType.Assembly;
+                var generic = asm.GetType("_Scripts.Singletons.Singleton`1");
+                if (generic == null) generic = AccessTools.TypeByName("_Scripts.Singletons.Singleton`1");
+                if (generic == null) return null;
+                var closed = generic.MakeGenericType(singletonTargetType);
+                var prop = closed.GetProperty("Instance",
+                    BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
+                if (prop != null) return prop.GetValue(null, null);
+            }
+            catch { }
+            return null;
+        }
+
+        public static void Reset()
+        {
+            _p2Counter = 0;
+            _p2Underwater = false;
+        }
+    }
+
+    internal static class MusicControllerUnderwaterPatches
+    {
+        public static bool StopUnderwater_Prefix()
+        {
+            // If P2 is still underwater, don't kill the loop just because P1 left water.
+            if (BodyMovementUnderwaterPatches.P2IsUnderwater)
+            {
+                return false;
+            }
+            return true;
+        }
+    }
+
+    // Prefix on WebThread.DeleteWebThread. Whenever a WebThread is about to be
+    // destroyed (including via SplitWebThread/QuickBuild/FixedAnchor/MovingAnchor/
+    // DeleteWeb/DestroyAll), make sure any P2 transforms parented to it are
+    // re-parented away first. BodyMovement.PerformWalking parents the spider
+    // GameObject and its targetTransform to the walked-on surface; if that surface
+    // is a WebThread being destroyed, Unity would destroy the P2 spider with it.
+    internal static class WebThreadDeletePatches
+    {
+        public static void DeleteWebThread_Prefix(MonoBehaviour __instance)
+        {
+            if (__instance == null) return;
+            try
+            {
+                var deletedRoot = __instance.transform;
+                if (deletedRoot == null) return;
+
+                // P2 spider
+                var p2bm = SplitScreenMod.P2BodyMovementInstance;
+                Transform spiderT = (p2bm != null) ? p2bm.transform : null;
+                if (spiderT != null && spiderT.IsChildOf(deletedRoot))
+                {
+                    spiderT.SetParent(null, true);
+                }
+
+                // P2 BodyMovement.targetTransform (private field)
+                if (p2bm != null)
+                {
+                    Transform targetT = null;
+                    var bmType = p2bm.GetType();
+                    var tProp = bmType.GetProperty("TargetTransform",
+                        BindingFlags.Public | BindingFlags.Instance);
+                    if (tProp != null) targetT = tProp.GetValue(p2bm, null) as Transform;
+                    if (targetT == null)
+                    {
+                        var tField = bmType.GetField("targetTransform",
+                            BindingFlags.NonPublic | BindingFlags.Instance);
+                        if (tField != null) targetT = tField.GetValue(p2bm) as Transform;
+                    }
+                    if (targetT != null && targetT.IsChildOf(deletedRoot))
+                    {
+                        // Reparent to spider — matches BodyMovement's own behavior
+                        // when it loses ground contact (BodyMovement.cs line 1114).
+                        targetT.SetParent(spiderT != null ? spiderT : null, true);
+                    }
+                }
+            }
+            catch { /* defensive — never block the original delete */ }
         }
     }
 
