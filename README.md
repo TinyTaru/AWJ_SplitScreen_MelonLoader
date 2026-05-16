@@ -21,9 +21,8 @@ Key settings:
 - `P2_GamepadIndex` (default 1 = second pad)
 - `FilterP1FromP2Gamepad` (default true)
 
-Install:
-Use Melon Loader 7.2. Install Melon Loader here: https://melonloader.co/download.html. Note that Melon Loader's website currently only shows 7.0. The 7.0 installer will update once opened.
-Build Release; copy `bin\Release\net472\AWJ_SplitScreen.dll` into `<GameFolder>\Mods\` (overwrite old).
+## Installation:
+Download the latest Melon Loader installer here: https://melonloader.co/download.html. Note that Melon Loader's website currently only shows 7.0. The installer will update when opened. Once you have downloaded the Melon Loader imstaller open it and select A Webbing Jouney. Make sure you have it set to install vertion 7.2. Then download the latest release of this mod, un-zip it and copy the DLL into `A Webbing Jouney\Mods\`.
 
 ## Player 2 progress:
 Legend
@@ -35,7 +34,7 @@ Legend
 - Movement 🟩
 - Camera 🟩
 - Jump 🟩
-- Collectables 🟥
+- Collectables 🟩
 
 Technical Notes:
 **Fix 1: Both controllers move P1**
