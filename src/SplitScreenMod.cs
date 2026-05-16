@@ -1571,11 +1571,13 @@ namespace AWJSplitScreen
                     {
                         _p2BodyMovement = _p2Spider.GetComponentInChildren(bmType, true) as Component;
                         P2BodyMovementInstance = _p2BodyMovement;
+                        // P1 resolution: ONLY accept a BodyMovement where isPlayer==true.
+                        // NPC spiders also have BodyMovement components, so a "first non-P2"
+                        // fallback can poison the cache with an NPC. If isPlayer isn't set
+                        // yet, leave P1BodyMovementInstance null and retry next frame — the
+                        // identity check downstream (P1JumpBypass) tolerates null safely.
                         if (P1BodyMovementInstance == null)
                         {
-                            // P1 is the BodyMovement with isPlayer==true that isn't P2.
-                            // NPC spiders also have BodyMovement components, so we can't
-                            // just pick the first non-P2 instance.
                             var isPlayerField = bmType.GetField("isPlayer",
                                 BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
                             var p1bms = UnityEngine.Object.FindObjectsOfType(bmType, true);
@@ -1595,21 +1597,11 @@ namespace AWJSplitScreen
                                     break;
                                 }
                             }
-                            // Fallback: if no isPlayer match (e.g., game hasn't set it yet),
-                            // pick first non-P2 to avoid leaving P1BodyMovementInstance null.
-                            if (P1BodyMovementInstance == null)
-                            {
-                                for (int i = 0; i < (p1bms != null ? p1bms.Length : 0); i++)
-                                {
-                                    var c = p1bms[i] as Component;
-                                    if (c != null && !object.ReferenceEquals(c, _p2BodyMovement))
-                                    {
-                                        P1BodyMovementInstance = c;
-                                        LoggerInstance.Warning("P1 BodyMovement resolved by fallback (no isPlayer match): " + c.gameObject.name);
-                                        break;
-                                    }
-                                }
-                            }
+                            // No fallback. If isPlayer isn't set yet we'll retry next
+                            // frame (this method is invoked every LateUpdate while
+                            // _p2BodyMovement is non-null). The retry path below
+                            // ensures lazy re-resolution if for some reason the cache
+                            // was lost or wasn't set on the first attempt.
                         }
                         const BindingFlags F = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
                         _bmRbProp = bmType.GetProperty("Rb", F);
@@ -1629,6 +1621,40 @@ namespace AWJSplitScreen
                 {
                     LoggerInstance.Warning("[P2CamDyn] BodyMovement reflection failed: " + ex.Message);
                 }
+            }
+
+            // Lazy P1 retry: if we cached P2 but never resolved P1 (e.g., isPlayer
+            // wasn't true yet during the initial pass), keep looking each frame
+            // until we find a BodyMovement with isPlayer==true that isn't P2.
+            if (_p2BodyMovement != null && P1BodyMovementInstance == null)
+            {
+                try
+                {
+                    var bmType = AccessTools.TypeByName("_Scripts.Spider.BodyMovement");
+                    if (bmType != null)
+                    {
+                        var isPlayerField = bmType.GetField("isPlayer",
+                            BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                        var p1bms = UnityEngine.Object.FindObjectsOfType(bmType, true);
+                        for (int i = 0; i < (p1bms != null ? p1bms.Length : 0); i++)
+                        {
+                            var c = p1bms[i] as Component;
+                            if (c == null || object.ReferenceEquals(c, _p2BodyMovement)) continue;
+                            bool isP1 = false;
+                            if (isPlayerField != null)
+                            {
+                                try { isP1 = (bool)isPlayerField.GetValue(c); } catch { }
+                            }
+                            if (isP1)
+                            {
+                                P1BodyMovementInstance = c;
+                                LoggerInstance.Msg("Resolved P1 BodyMovement (lazy retry): " + c.gameObject.name);
+                                break;
+                            }
+                        }
+                    }
+                }
+                catch { }
             }
 
             if (!_p1FollowCached)
@@ -1986,6 +2012,10 @@ namespace AWJSplitScreen
                 UnityEngine.Object.Destroy(_p2Spider);
                 _p2Spider = null;
             }
+
+            // Drop cached LegController identity mappings — they reference
+            // instanceIDs that may belong to the destroyed P2 spider.
+            try { LegControllerPatches.ClearCache(); } catch { }
 
             _webController = null;
             _p2SpiderInteraction = null;
@@ -4264,6 +4294,17 @@ namespace AWJSplitScreen
     {
         private static FieldInfo _targetLocalField;
         private static bool _targetLocalFieldSearched;
+        // Cache "is this LegController P2's?" by instanceID so we don't depend on
+        // hierarchy walks every FixedUpdate. BodyMovement.InitializeJump detaches
+        // the spider's transform.parent mid-jump (ilspy: BodyMovement.cs:952),
+        // which would make GetComponentInParent<P2Marker>() return null and stop
+        // applying the P2 leg-target reparent fix exactly when it's most needed.
+        private static readonly Dictionary<int, bool> _isP2Cache = new Dictionary<int, bool>();
+
+        internal static void ClearCache()
+        {
+            _isP2Cache.Clear();
+        }
 
         private static Transform GetTargetLocal(object instance)
         {
@@ -4277,11 +4318,47 @@ namespace AWJSplitScreen
             try { return _targetLocalField.GetValue(instance) as Transform; } catch { return null; }
         }
 
+        private static bool IsP2LegController(MonoBehaviour mb)
+        {
+            int id = mb.GetInstanceID();
+            if (_isP2Cache.TryGetValue(id, out bool cached)) return cached;
+
+            bool isP2 = false;
+            var p2Spider = SplitScreenMod._p2Spider;
+            if (p2Spider != null)
+            {
+                // Walk up the transform chain looking for the P2 spider root.
+                // Done once and cached, so the result survives parent detachment.
+                for (var t = mb.transform; t != null; t = t.parent)
+                {
+                    if (object.ReferenceEquals(t.gameObject, p2Spider))
+                    {
+                        isP2 = true;
+                        break;
+                    }
+                }
+                // Fallback for components that have already been detached by the
+                // time we first see them: identity-check the owning BodyMovement.
+                if (!isP2)
+                {
+                    var p2bm = SplitScreenMod.P2BodyMovementInstance;
+                    if (p2bm != null)
+                    {
+                        var ownBm = mb.GetComponentInParent(p2bm.GetType()) as Component;
+                        if (ownBm != null && object.ReferenceEquals(ownBm, p2bm))
+                            isP2 = true;
+                    }
+                }
+            }
+            _isP2Cache[id] = isP2;
+            return isP2;
+        }
+
         public static void FixedUpdate_Prefix(object __instance)
         {
             var mb = __instance as MonoBehaviour;
             if (mb == null) return;
-            if (mb.GetComponentInParent<P2Marker>() == null) return;
+            if (!IsP2LegController(mb)) return;
 
             var targetLocal = GetTargetLocal(__instance);
             if (targetLocal == null) return;
