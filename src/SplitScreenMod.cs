@@ -26,6 +26,7 @@ namespace AWJSplitScreen
 
         internal static bool P2ShootHeld;              // computed each frame & from WebController.Update prefix
         internal static bool P2JumpPressed;            // set in OnUpdate, consumed in FixedUpdate
+        internal static bool P1JumpPressed;            // bypass for shared jumpInputAction phase blocking when P2 holds South
         internal static bool InP2WebContext;           // one-shot actions
         internal static Transform P2InputTransform;
         internal static Camera P2Camera;
@@ -821,6 +822,19 @@ namespace AWJSplitScreen
                 if (InputCompat.IsP2JumpPressedNow(P2UseGamepad, P2GamepadIndex))
                     P2JumpPressed = true;
 
+                // P1 jump bypass: shared jumpInputAction can get stuck in Performed
+                // phase while P2 holds South, suppressing P1's `performed` callback.
+                // Poll P1's input directly and force P1.jumpInput=true in FixedUpdate.
+                if (InputCompat.IsP1JumpPressedNow(P2GamepadIndex))
+                {
+                    P1JumpPressed = true;
+                    if (!BodyMovementPatches._p1JumpPollLogged)
+                    {
+                        BodyMovementPatches._p1JumpPollLogged = true;
+                        try { LoggerInstance.Msg("[P1JumpBypass] IsP1JumpPressedNow detected press (first time). JumpInputField=" + (BodyMove_JumpInputField != null ? BodyMove_JumpInputField.Name : "NULL") + ", P1BodyMovement=" + (P1BodyMovementInstance != null ? "ok" : "NULL")); } catch { }
+                    }
+                }
+
                 if (InputCompat.IsP2InteractPressedNow(P2UseGamepad, P2GamepadIndex, P2InteractKeyProp, P2InteractKeyFallback))
                     TriggerP2Interact();
 
@@ -1559,14 +1573,41 @@ namespace AWJSplitScreen
                         P2BodyMovementInstance = _p2BodyMovement;
                         if (P1BodyMovementInstance == null)
                         {
+                            // P1 is the BodyMovement with isPlayer==true that isn't P2.
+                            // NPC spiders also have BodyMovement components, so we can't
+                            // just pick the first non-P2 instance.
+                            var isPlayerField = bmType.GetField("isPlayer",
+                                BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
                             var p1bms = UnityEngine.Object.FindObjectsOfType(bmType, true);
                             for (int i = 0; i < (p1bms != null ? p1bms.Length : 0); i++)
                             {
                                 var c = p1bms[i] as Component;
-                                if (c != null && !object.ReferenceEquals(c, _p2BodyMovement))
+                                if (c == null || object.ReferenceEquals(c, _p2BodyMovement)) continue;
+                                bool isP1 = false;
+                                if (isPlayerField != null)
+                                {
+                                    try { isP1 = (bool)isPlayerField.GetValue(c); } catch { }
+                                }
+                                if (isP1)
                                 {
                                     P1BodyMovementInstance = c;
+                                    LoggerInstance.Msg("Resolved P1 BodyMovement: " + c.gameObject.name);
                                     break;
+                                }
+                            }
+                            // Fallback: if no isPlayer match (e.g., game hasn't set it yet),
+                            // pick first non-P2 to avoid leaving P1BodyMovementInstance null.
+                            if (P1BodyMovementInstance == null)
+                            {
+                                for (int i = 0; i < (p1bms != null ? p1bms.Length : 0); i++)
+                                {
+                                    var c = p1bms[i] as Component;
+                                    if (c != null && !object.ReferenceEquals(c, _p2BodyMovement))
+                                    {
+                                        P1BodyMovementInstance = c;
+                                        LoggerInstance.Warning("P1 BodyMovement resolved by fallback (no isPlayer match): " + c.gameObject.name);
+                                        break;
+                                    }
                                 }
                             }
                         }
@@ -1971,6 +2012,7 @@ namespace AWJSplitScreen
             InP2WebContext = false;
             P2ShootHeld = false;
             P2JumpPressed = false;
+            P1JumpPressed = false;
             BodyMovementUnderwaterPatches.Reset();
         }
     }
@@ -2676,7 +2718,7 @@ namespace AWJSplitScreen
 
             try
             {
-                if (_logger != null && SplitScreenMod.P2Camera != null)
+                if (false && _logger != null && SplitScreenMod.P2Camera != null)
                 {
                     var ct = SplitScreenMod.P2Camera.transform;
                     _logger.Msg("[P2WebManager] InvokeAsP2 begin | P2CamPos=" + ct.position + " fwd=" + ct.forward
@@ -2688,7 +2730,7 @@ namespace AWJSplitScreen
                     catch (Exception ex) { if (_logger != null) _logger.Warning("[P2WebManager] CheckForWebTarget(P2) failed: " + ex.Message); }
 
                     // Log what the engine selected as the web target after CheckForWebTarget.
-                    if (_logger != null)
+                    if (false && _logger != null)
                     {
                         try
                         {
@@ -2959,7 +3001,7 @@ namespace AWJSplitScreen
                 _bPrev = bHeld;
 
                 // --- Periodic debug dump ---
-                if (Time.unscaledTime >= _nextDebugLog)
+                if (false && Time.unscaledTime >= _nextDebugLog)
                 {
                     _nextDebugLog = Time.unscaledTime + 2f;
                     if (_logger != null)
@@ -3703,6 +3745,10 @@ namespace AWJSplitScreen
 
         private static bool IsP2(object __instance)
         {
+            // SpiderInteraction is on the spider root, not BodyMovement directly,
+            // so identity-equality against P2BodyMovementInstance doesn't apply here.
+            // Use hierarchy check, which is correct for SpiderInteraction (its
+            // transform parent is not modified by InitializeJump).
             var mb = __instance as MonoBehaviour;
             if (mb == null) return false;
             return mb.GetComponentInParent<P2Marker>() != null;
@@ -3792,12 +3838,18 @@ namespace AWJSplitScreen
     {
         private static bool IsP2(object __instance)
         {
+            // Identity check first — robust against parent=null detachment
+            // (P2's InitializeJump sets base.transform.parent=null, which can break
+            // hierarchy-based GetComponentInParent<P2Marker>() if BodyMovement is on
+            // a child of _p2Spider).
+            if (SplitScreenMod.P2BodyMovementInstance != null &&
+                ReferenceEquals(__instance, SplitScreenMod.P2BodyMovementInstance))
+                return true;
             var mb = __instance as MonoBehaviour;
             if (mb == null) return false;
             return mb.GetComponentInParent<P2Marker>() != null;
         }
 
-        // PerformJumping cached fields
         private static bool _pjFieldsCached;
         private static FieldInfo _fPjJumpTimer, _fPjRb, _fPjState, _fPjLastRotation;
         private static FieldInfo _fPjMoveInput, _fPjPitchAngle;
@@ -4051,6 +4103,9 @@ namespace AWJSplitScreen
         private static bool _stateFieldCached;
         private static FieldInfo _fStateForJump;
         private static object _jumpingStateForJump;
+        private static object _walkingStateForJump;
+        internal static bool _p1JumpBypassLogged;
+        internal static bool _p1JumpPollLogged;
 
         private static bool IsAlreadyJumping(object instance)
         {
@@ -4060,10 +4115,21 @@ namespace AWJSplitScreen
                 _fStateForJump = instance.GetType().GetField("state",
                     BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
                 if (_fStateForJump != null)
+                {
                     try { _jumpingStateForJump = Enum.Parse(_fStateForJump.FieldType, "Jumping"); } catch { }
+                    try { _walkingStateForJump = Enum.Parse(_fStateForJump.FieldType, "Walking"); } catch { }
+                }
             }
             if (_fStateForJump == null || _jumpingStateForJump == null) return false;
             try { return _fStateForJump.GetValue(instance).Equals(_jumpingStateForJump); } catch { return false; }
+        }
+
+        private static bool IsWalkingExact(object instance)
+        {
+            // Ensure cache (shares the _stateFieldCached path)
+            if (!_stateFieldCached) IsAlreadyJumping(instance);
+            if (_fStateForJump == null || _walkingStateForJump == null) return false;
+            try { return _fStateForJump.GetValue(instance).Equals(_walkingStateForJump); } catch { return false; }
         }
 
         public static void FixedUpdate_Prefix(object __instance)
@@ -4102,6 +4168,32 @@ namespace AWJSplitScreen
                         }
                         if (raw.sqrMagnitude > 1f) raw.Normalize();
                         try { fi.SetValue(__instance, raw); } catch { }
+                    }
+                }
+            }
+            else
+            {
+                // P1 jump bypass: consume P1JumpPressed flag set by direct polling.
+                // CRITICAL: the else branch fires for ANY non-P2 BodyMovement,
+                // including NPC spiders. We must only consume the flag for the
+                // actual P1 instance — otherwise an NPC's FixedUpdate (which may
+                // run before P1's in the same fixed step) eats the flag and P1
+                // never jumps.
+                if (!ReferenceEquals(__instance, SplitScreenMod.P1BodyMovementInstance))
+                    return;
+
+                if (SplitScreenMod.P1JumpPressed)
+                {
+                    SplitScreenMod.P1JumpPressed = false;
+                    if (!IsAlreadyJumping(__instance) &&
+                        SplitScreenMod.BodyMove_JumpInputField != null)
+                    {
+                        try { SplitScreenMod.BodyMove_JumpInputField.SetValue(__instance, true); } catch { }
+                        if (!_p1JumpBypassLogged)
+                        {
+                            _p1JumpBypassLogged = true;
+                            try { MelonLoader.MelonLogger.Msg("[P1JumpBypass] jumpInput=true set on P1 BodyMovement (first time)."); } catch { }
+                        }
                     }
                 }
             }
@@ -4883,6 +4975,47 @@ namespace AWJSplitScreen
             var gp = GetGamepadAtIndex(index);
             bool south = ReadButtonDown(gp, _buttonSouthProp);
             return kb || south;
+        }
+
+        // P1 jump bypass: Polls Keyboard.Space + any non-P2 gamepad's South button.
+        // Needed because the shared jumpInputAction (used by both P1 and P2 BodyMovement
+        // instances) gets stuck in the Performed phase while P2's South is actuated, so
+        // P1's gamepad-South press doesn't fire a fresh `performed` callback.
+        private static bool _p1PollEnteredLogged;
+        private static bool _p1PollKbLogged;
+        public static bool IsP1JumpPressedNow(int p2Index)
+        {
+            if (!_p1PollEnteredLogged)
+            {
+                _p1PollEnteredLogged = true;
+                try { MelonLoader.MelonLogger.Msg("[P1JumpBypass] IsP1JumpPressedNow CALLED (first time). _usingNewInput=" + _usingNewInput + " _gamepadType=" + (_gamepadType != null) + " _gamepadAllProp=" + (_gamepadAllProp != null) + " _buttonSouthProp=" + (_buttonSouthProp != null) + " _buttonWasPressedThisFrame=" + (_buttonWasPressedThisFrame != null)); } catch { }
+            }
+
+            // Keyboard Space — vanilla path also covers this, but include for completeness
+            // (it can never be blocked by gamepad phase issues anyway).
+            if (Down("spaceKey", KeyCode.Space))
+            {
+                if (!_p1PollKbLogged)
+                {
+                    _p1PollKbLogged = true;
+                    try { MelonLoader.MelonLogger.Msg("[P1JumpBypass] Space key detected (first time)."); } catch { }
+                }
+                return true;
+            }
+
+            // Iterate gamepads 0..MAX via the proven GetGamepadAtIndex path
+            // (don't reinvent ReadOnlyArray reflection — use the cached one).
+            const int MaxGamepads = 8;
+            var p2gp = GetGamepadAtIndex(p2Index);
+            for (int i = 0; i < MaxGamepads; i++)
+            {
+                if (i == p2Index) continue;
+                var gp = GetGamepadAtIndex(i);
+                if (gp == null) continue;
+                if (p2gp != null && object.ReferenceEquals(gp, p2gp)) continue;
+                if (ReadButtonDown(gp, _buttonSouthProp)) return true;
+            }
+            return false;
         }
 
         public static bool IsP2InteractPressedNow(bool useGamepad, int index, string kbProp, KeyCode kbFallback)
