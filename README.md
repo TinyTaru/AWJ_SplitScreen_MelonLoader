@@ -22,7 +22,7 @@ Key settings:
 - `FilterP1FromP2Gamepad` (default true)
 
 ## Installation:
-Download the latest Melon Loader installer here: https://melonloader.co/download.html. Note that Melon Loader's website currently only shows 7.0. The installer will update when opened. Once you have downloaded the Melon Loader imstaller open it and select A Webbing Jouney. Make sure you have it set to install vertion 7.2. Then download the latest release of this mod, un-zip it and copy the DLL into `A Webbing Jouney\Mods\`.
+Download the latest Melon Loader installer here: https://melonloader.co/download.html. Note that Melon Loader's website currently only shows 7.0. The installer will update when opened. Once you have downloaded the Melon Loader installer open it and select A Webbing Journey. Make sure you have it set to install version 7.2. Then download the latest release of this mod, un-zip it and copy the DLL into `A Webbing Journey\Mods\`.
 
 ## Player 2 progress:
 Legend
