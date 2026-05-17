@@ -2090,6 +2090,15 @@ namespace AWJSplitScreen
         private FieldInfo _fDeletePlayerWebsTimer;
         private FieldInfo _fWebTargetPrefab;
         private FieldInfo _fWebAnchorPrefab;
+        // P1's visible target sphere (Transform with MeshRenderer + Mesh), the
+        // dynamic-scale curve, and max web distance. We mirror these onto P2's
+        // own target dot so it looks identical and scales with distance the
+        // same way P1's does.
+        private FieldInfo _fWebTargetGfx;
+        private FieldInfo _fWebTargetSize;
+        private FieldInfo _fWebDistance;
+        private AnimationCurve _webTargetSizeCurve;
+        private float _webDistanceVal = 50f;
         // CameraController.mainCamera private field — game systems often access this
         // field directly (Singleton<CameraController>.Instance.mainCamera) bypassing the
         // MainCamera property, so we must swap the field itself during P2 invocations.
@@ -2208,34 +2217,60 @@ namespace AWJSplitScreen
 
         private void CreateTargetDot()
         {
+            // Prefer cloning P1's own webTargetGfx so the visuals match exactly
+            // (same mesh, same material). Falls back to a primitive sphere if
+            // reflection didn't resolve the field for some reason.
+            GameObject cloneSrc = null;
+            try
+            {
+                if (_fWebTargetGfx != null && _p1WebController != null)
+                {
+                    var srcTr = _fWebTargetGfx.GetValue(_p1WebController) as Transform;
+                    if (srcTr != null) cloneSrc = srcTr.gameObject;
+                }
+            }
+            catch { }
+
+            if (cloneSrc != null)
+            {
+                _p2TargetDot = UnityEngine.Object.Instantiate(cloneSrc);
+                _p2TargetDot.name = "P2_WebTargetDot";
+                _p2TargetDot.transform.SetParent(null, false);
+                // Strip colliders so it doesn't interfere with raycasts.
+                foreach (var c in _p2TargetDot.GetComponentsInChildren<Collider>(true))
+                {
+                    try { UnityEngine.Object.Destroy(c); } catch { }
+                }
+                // Match P1's render queue/shadow settings (its renderer is already
+                // configured). Initial scale will be replaced every frame by the
+                // dynamic-scale code in UpdateTargetDot.
+                _p2TargetDot.transform.localScale = Vector3.one * _p2DotScale;
+                _p2TargetDot.SetActive(false);
+                _logger.Msg("[P2WebManager] Cloned target dot from P1 webTargetGfx.");
+                return;
+            }
+
+            // Fallback: plain sphere (legacy path).
             _p2TargetDot = GameObject.CreatePrimitive(PrimitiveType.Sphere);
             _p2TargetDot.name = "P2_WebTargetDot";
             _p2TargetDot.transform.localScale = Vector3.one * _p2DotScale;
 
-            // Remove collider so it doesn't interfere with raycasts
             var col = _p2TargetDot.GetComponent<Collider>();
             if (col != null) UnityEngine.Object.Destroy(col);
 
-            // Bright unlit red material — visible at distance
             var rend = _p2TargetDot.GetComponent<Renderer>();
             if (rend != null)
             {
-                // Try Unlit/Color first (solid color), fallback to Sprites/Default
                 var shader = Shader.Find("Unlit/Color");
                 if (shader == null) shader = Shader.Find("Sprites/Default");
                 if (shader == null) shader = Shader.Find("Standard");
                 if (shader == null) shader = rend.material.shader;
                 var mat = new Material(shader);
                 mat.color = new Color(1f, 0f, 0f, 1f);
-                // Try to set _Color property directly for Standard shader
                 try { mat.SetColor("_Color", new Color(1f, 0f, 0f, 1f)); } catch { }
                 try { mat.SetColor("_EmissionColor", new Color(1f, 0f, 0f, 1f)); } catch { }
-
-                // Force ZTest=Always and ZWrite Off so the dot draws over any occluding geometry
-                // (including P2's own body which sits between the camera and the target).
                 try { mat.SetInt("_ZTest", (int)UnityEngine.Rendering.CompareFunction.Always); } catch { }
                 try { mat.SetInt("_ZWrite", 0); } catch { }
-                // Render in a very late queue so it draws last, on top of everything
                 mat.renderQueue = 5000;
                 rend.material = mat;
                 rend.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
@@ -2243,7 +2278,7 @@ namespace AWJSplitScreen
             }
 
             _p2TargetDot.SetActive(false);
-            _logger.Msg("[P2WebManager] Created target dot sphere.");
+            _logger.Msg("[P2WebManager] Created target dot sphere (fallback).");
         }
 
         private bool _webLineMatCached;
@@ -2577,6 +2612,19 @@ namespace AWJSplitScreen
                 _fDeletePlayerWebsTimer = TryGetField("deletePlayerWebsTimer");
                 _fWebTargetPrefab = TryGetField("webTargetPrefab");
                 _fWebAnchorPrefab = TryGetField("webAnchorPrefab");
+                _fWebTargetGfx = TryGetField("webTargetGfx");
+                _fWebTargetSize = TryGetField("webTargetSize");
+                _fWebDistance = TryGetField("webDistance");
+                try
+                {
+                    if (_fWebTargetSize != null) _webTargetSizeCurve = _fWebTargetSize.GetValue(_p1WebController) as AnimationCurve;
+                    if (_fWebDistance != null)
+                    {
+                        var v = _fWebDistance.GetValue(_p1WebController);
+                        if (v is float f && f > 0f) _webDistanceVal = f;
+                    }
+                }
+                catch { }
 
                 // CameraController.mainCamera field + singleton instance for direct field swap.
                 try
@@ -3175,6 +3223,8 @@ namespace AWJSplitScreen
         {
             if (_p2TargetDot == null || _p2Camera == null) return;
 
+            bool placed = false;
+
             // Prefer the engine-resolved web target from CheckForWebTarget (refreshed
             // each frame via InvokeAsP2). This snaps the dot to webbable surfaces /
             // WebJoints / WebThreads exactly like P1's reticle, instead of the raw
@@ -3188,27 +3238,69 @@ namespace AWJSplitScreen
                     {
                         _p2TargetDot.SetActive(true);
                         _p2TargetDot.transform.position = webTr.position;
-                        return;
+                        placed = true;
                     }
                 }
             }
             catch { /* fall through to raw raycast */ }
 
-            // Fallback: raw camera-forward raycast (when nothing webbable is in front).
-            // P2's spider is on layer 2 (Ignore Raycast) so the ray passes through it.
-            // The dot material has ZTest=Always so it renders on top of everything.
-            var ray = new Ray(_p2Camera.transform.position, _p2Camera.transform.forward);
-            RaycastHit hit;
-
-            if (Physics.Raycast(ray, out hit, _grappleMaxDist))
+            if (!placed)
             {
-                _p2TargetDot.SetActive(true);
-                _p2TargetDot.transform.position = hit.point + hit.normal * _p2NormalOffset;
+                // Fallback: raw camera-forward raycast (when nothing webbable is in front).
+                // P2's spider is on layer 2 (Ignore Raycast) so the ray passes through it.
+                // The dot material has ZTest=Always so it renders on top of everything.
+                var ray = new Ray(_p2Camera.transform.position, _p2Camera.transform.forward);
+                RaycastHit hit;
+
+                if (Physics.Raycast(ray, out hit, _grappleMaxDist))
+                {
+                    _p2TargetDot.SetActive(true);
+                    _p2TargetDot.transform.position = hit.point + hit.normal * _p2NormalOffset;
+                    placed = true;
+                }
+                else
+                {
+                    _p2TargetDot.SetActive(false);
+                }
+            }
+
+            if (placed)
+                ApplyTargetDotScale();
+        }
+
+        // Mirror P1's distance-based dot scaling so the on-screen reticle size
+        // stays roughly constant regardless of how far the target is. P1 uses:
+        //   webTargetGfx.localScale = Vector3.one * webTargetSize.Evaluate(
+        //       Vector3.Distance(webTargetGfx.position, webStartPoint.position) / webDistance);
+        // (see ilspy_WebController/_Scripts.Singletons/WebController.cs:505)
+        private void ApplyTargetDotScale()
+        {
+            if (_p2TargetDot == null) return;
+
+            // Use P2's own web start point so distance reflects P2's view.
+            // Fall back to the camera position if no start point has been
+            // wired up yet (e.g., before InitializeP2WebState).
+            Vector3 start;
+            if (_p2WebStartPoint != null) start = _p2WebStartPoint.position;
+            else if (_p2InputTransform != null) start = _p2InputTransform.position;
+            else if (_p2Camera != null) start = _p2Camera.transform.position;
+            else return;
+
+            float dist = Vector3.Distance(_p2TargetDot.transform.position, start);
+            float t = (_webDistanceVal > 0f) ? Mathf.Clamp01(dist / _webDistanceVal) : 0f;
+
+            float s;
+            if (_webTargetSizeCurve != null)
+            {
+                s = _webTargetSizeCurve.Evaluate(t);
             }
             else
             {
-                _p2TargetDot.SetActive(false);
+                // Reasonable linear fallback matching the spirit of P1's curve.
+                s = Mathf.Lerp(0.15f, 1.0f, t);
             }
+            if (s <= 0.0001f) s = 0.0001f;
+            _p2TargetDot.transform.localScale = Vector3.one * s;
         }
 
         private void UpdateGrappleLine()
