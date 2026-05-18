@@ -92,8 +92,18 @@ namespace AWJSplitScreen
         private object _p1CameraZoom;
         private float _p1MinZoom = 3.0f;
         private float _p1MaxZoom = 12.0f;
+        private int _p1ZoomSteps = 6;
         private bool _p1ZoomInWhenLookingUp;
         private bool _p1CameraZoomCached;
+
+        // P2 manual zoom mirrors CameraZoom.MobileZoom / OnZoom(button path):
+        // CameraZoom.cs builds `zoomArray[zoomSteps]` where each element is:
+        //   minZoom + i * (maxZoom - minZoom) / (zoomSteps - 1)
+        // and advances `zoomIndex` on each button press. P2 keeps its own
+        // independent manual zoom/index but uses the same exact step values.
+        private float[] _p2ZoomArray;
+        private int _p2ZoomIndex = -1;
+        private float _p2ManualZoom = 8.0f;
 
         // P2 BodyMovement reflection cache (for velocity / state input to the zoom curve).
         private Component _p2BodyMovement;
@@ -151,7 +161,7 @@ namespace AWJSplitScreen
             SceneManager.sceneLoaded += (_, __) => MelonCoroutines.Start(DeferredSetup());
 
             LoggerInstance.Msg("AWJ Split Screen + P2 Inject v0.2.2 loaded.");
-            LoggerInstance.Msg("F9 split, F10 orientation | P2 Move: IJKL or Gamepad LStick | P2 Look: N/M or RStickX | P2 Jump: A | P2 Interact: H/X | P2 Web: U/LT shoot, P/RT attach, O/B delete, RightCtrl/RB release.");
+            LoggerInstance.Msg("F9 split, F10 orientation | P2 Move: IJKL or Gamepad LStick | P2 Look: N/M or RStickX | P2 Zoom: RStick press | P2 Jump: A | P2 Interact: H/X | P2 Web: U/LT shoot, P/RT attach, O/B delete, RightCtrl/RB release.");
             LoggerInstance.Msg("Tip: If both controllers still move P1, ensure FilterP1FromP2Gamepad=true and P2_GamepadIndex is the second pad (usually 1).");
         }
 
@@ -465,6 +475,40 @@ namespace AWJSplitScreen
             catch (Exception ex)
             {
                 LoggerInstance.Warning("CameraMouseLook patch failed (non-fatal): " + ex);
+            }
+
+            // CameraZoom.OnZoom patch — blocks P2 gamepad right-stick click from reaching P1 zoom
+            try
+            {
+                var cameraZoomType = AccessTools.TypeByName("_Scripts.Camera.CameraZoom");
+                if (cameraZoomType != null)
+                {
+                    var onZoom = AccessTools.Method(cameraZoomType, "OnZoom");
+                    if (onZoom != null)
+                    {
+                        if (!SkipCallbackContextPatches)
+                        {
+                            h.Patch(onZoom, prefix: new HarmonyMethod(typeof(CameraZoomPatches), nameof(CameraZoomPatches.OnZoom_Prefix)));
+                            LoggerInstance.Msg("Patched CameraZoom.OnZoom to block P2 gamepad input.");
+                        }
+                        else
+                        {
+                            LoggerInstance.Warning("Skipped CameraZoom.OnZoom patch due to IL2CPP callback compatibility mode.");
+                        }
+                    }
+                    else
+                    {
+                        LoggerInstance.Warning("CameraZoom.OnZoom not found.");
+                    }
+                }
+                else
+                {
+                    LoggerInstance.Warning("CameraZoom type not found.");
+                }
+            }
+            catch (Exception ex)
+            {
+                LoggerInstance.Warning("CameraZoom patch failed (non-fatal): " + ex);
             }
 
             // Camera.main getter patch
@@ -837,6 +881,12 @@ namespace AWJSplitScreen
 
                 if (InputCompat.IsP2InteractPressedNow(P2UseGamepad, P2GamepadIndex, P2InteractKeyProp, P2InteractKeyFallback))
                     TriggerP2Interact();
+
+                if (_p2Spider != null && _camRightOrBottom != null
+                    && InputCompat.IsP2CameraZoomPressedNow(P2UseGamepad, P2GamepadIndex))
+                {
+                    CycleP2CameraZoom();
+                }
 
                 // Drive P2's independent web system
                 if (_p2WebManager != null)
@@ -1284,11 +1334,11 @@ namespace AWJSplitScreen
             // Tilt upward slightly (15 degrees worth) — also in world up.
             _p2CamDir = (behind + Vector3.up * 0.27f).normalized;
 
-            // Prime the dynamic distance: read P1's current Cinemachine 3rd-person
-            // CameraDistance so P2 starts at the same zoom P1 is currently using,
-            // then exponential-decay smoothing drives it from P2's own velocity.
-            float seed = TryReadP1CameraDistance(out var p1Dist) ? p1Dist
-                : Mathf.Clamp(P2CameraDistance, _p1MinZoom, _p1MaxZoom);
+            // Prime the dynamic distance from P2's own current manual zoom state.
+            // The manual preset ladder uses the exact CameraZoom.cs formula, but the
+            // chosen preset is independent from P1.
+            SyncP2ZoomStateFromPrefs();
+            float seed = Mathf.Clamp(_p2ManualZoom, _p1MinZoom, _p1MaxZoom);
             _p2CamSmoothedZoom = seed;
             _p2CamDistance = seed;
 
@@ -1534,12 +1584,16 @@ namespace AWJSplitScreen
                             const BindingFlags F = BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public;
                             var minF = czType.GetField("minZoom", F);
                             var maxF = czType.GetField("maxZoom", F);
+                            var stepsF = czType.GetField("zoomSteps", F);
                             var zupF = czType.GetField("zoomInWhenLookingUp", F);
                             if (minF != null) _p1MinZoom = (float)minF.GetValue(_p1CameraZoom);
                             if (maxF != null) _p1MaxZoom = (float)maxF.GetValue(_p1CameraZoom);
+                            if (stepsF != null) _p1ZoomSteps = Mathf.Max(2, (int)stepsF.GetValue(_p1CameraZoom));
                             if (zupF != null) _p1ZoomInWhenLookingUp = (bool)zupF.GetValue(_p1CameraZoom);
                             LoggerInstance.Msg("[P2CamDyn] P1 CameraZoom cached: min=" + _p1MinZoom.ToString("F2")
-                                + " max=" + _p1MaxZoom.ToString("F2") + " zoomInUp=" + _p1ZoomInWhenLookingUp);
+                                + " max=" + _p1MaxZoom.ToString("F2") + " steps=" + _p1ZoomSteps
+                                + " zoomInUp=" + _p1ZoomInWhenLookingUp);
+                            RebuildP2ZoomArray();
                             _p1CameraZoomCached = true;
                         }
                     }
@@ -1693,6 +1747,103 @@ namespace AWJSplitScreen
             }
         }
 
+        private void RebuildP2ZoomArray()
+        {
+            int zoomSteps = Mathf.Max(2, _p1ZoomSteps);
+            float minZoom = _p1MinZoom;
+            float maxZoom = Mathf.Max(_p1MaxZoom, minZoom + 0.01f);
+
+            if (_p2ZoomArray != null && _p2ZoomArray.Length == zoomSteps)
+            {
+                bool same = true;
+                for (int i = 0; i < zoomSteps; i++)
+                {
+                    float want = minZoom + (float)i * (maxZoom - minZoom) / (float)(zoomSteps - 1);
+                    if (Mathf.Abs(_p2ZoomArray[i] - want) > 0.0001f)
+                    {
+                        same = false;
+                        break;
+                    }
+                }
+                if (same) return;
+            }
+
+            _p2ZoomArray = new float[zoomSteps];
+            for (int i = 0; i < zoomSteps; i++)
+            {
+                _p2ZoomArray[i] = minZoom + (float)i * (maxZoom - minZoom) / (float)(zoomSteps - 1);
+            }
+        }
+
+        private int FindNearestP2ZoomIndex(float zoom)
+        {
+            RebuildP2ZoomArray();
+            if (_p2ZoomArray == null || _p2ZoomArray.Length == 0) return 0;
+
+            int best = 0;
+            float bestDelta = Mathf.Abs(_p2ZoomArray[0] - zoom);
+            for (int i = 1; i < _p2ZoomArray.Length; i++)
+            {
+                float delta = Mathf.Abs(_p2ZoomArray[i] - zoom);
+                if (delta < bestDelta)
+                {
+                    bestDelta = delta;
+                    best = i;
+                }
+            }
+            return best;
+        }
+
+        private void SyncP2ZoomStateFromPrefs()
+        {
+            RebuildP2ZoomArray();
+            if (_p2ZoomArray == null || _p2ZoomArray.Length == 0)
+            {
+                _p2ManualZoom = Mathf.Clamp(_p2ManualZoom, _p1MinZoom, Mathf.Max(_p1MaxZoom, _p1MinZoom + 0.01f));
+                _p2ZoomIndex = -1;
+                return;
+            }
+
+            // Mirror vanilla CameraZoom more closely: the save/pref value is only used
+            // to SEED runtime zoom state, then the live `zoom`/`zoomIndex` fields are
+            // authoritative until the component is torn down. Re-reading the pref every
+            // frame causes brief outward movement followed by a snap back to the old
+            // distance if the pref path lags behind the runtime toggle.
+            if (_p2ZoomIndex < 0 || _p2ZoomIndex >= _p2ZoomArray.Length)
+            {
+                float seed = Mathf.Clamp(P2CameraDistance, _p1MinZoom, Mathf.Max(_p1MaxZoom, _p1MinZoom + 0.01f));
+                _p2ManualZoom = seed;
+                _p2ZoomIndex = FindNearestP2ZoomIndex(seed);
+            }
+            else
+            {
+                _p2ManualZoom = Mathf.Clamp(_p2ManualZoom, _p1MinZoom, Mathf.Max(_p1MaxZoom, _p1MinZoom + 0.01f));
+            }
+        }
+
+        private void CycleP2CameraZoom()
+        {
+            EnsureCameraDynamicsCached();
+            SyncP2ZoomStateFromPrefs();
+            if (_p2ZoomArray == null || _p2ZoomArray.Length == 0) return;
+
+            _p2ZoomIndex++;
+            if (_p2ZoomIndex > _p2ZoomArray.Length - 1)
+                _p2ZoomIndex = 0;
+
+            _p2ManualZoom = _p2ZoomArray[_p2ZoomIndex];
+            P2CameraDistance = _p2ManualZoom;
+            try
+            {
+                if (_p2CameraDistancePref != null)
+                    _p2CameraDistancePref.Value = _p2ManualZoom;
+            }
+            catch { }
+
+            LoggerInstance.Msg("[P2CamZoom] Preset " + (_p2ZoomIndex + 1) + "/" + _p2ZoomArray.Length
+                + " -> " + _p2ManualZoom.ToString("F2"));
+        }
+
         // Resolves P1's Cinemachine3rdPersonFollow body component on the follow vcam.
         // Centralized so both distance reads and collision-setting reads can share the
         // generic-method lookup, and so we don't need a compile-time Cinemachine reference.
@@ -1740,7 +1891,7 @@ namespace AWJSplitScreen
 
         // Mirrors _Scripts.Camera.CameraZoom.HandleCameraZoom for P2:
         //   - autoZoom: target = clamp(minZoom + speed, max=maxZoom)
-        //   - non-autoZoom: target = clamp(P2CameraDistance pref, min, max)
+        //   - non-autoZoom: target = P2's independent manual zoom preset
         //   - smoothed via ExponentialDecay(current, target, decay=5, dt)
         //   - if zoomInWhenLookingUp && walking && !webTouched:
         //       finalDist = Lerp(smoothed, 0, max(dot(spider.up, cam.forward), 0) * 1.5)
@@ -1783,9 +1934,10 @@ namespace AWJSplitScreen
             }
             catch { }
 
+            SyncP2ZoomStateFromPrefs();
             float targetZoom = autoZoom
                 ? Mathf.Min(minZoom + speed * 1f, maxZoom)
-                : Mathf.Clamp(P2CameraDistance, minZoom, maxZoom);
+                : Mathf.Clamp(_p2ManualZoom, minZoom, maxZoom);
 
             if (_p2CamSmoothedZoom < 0f) _p2CamSmoothedZoom = targetZoom;
             _p2CamSmoothedZoom = ExponentialDecay(_p2CamSmoothedZoom, targetZoom, 5f, dt);
@@ -2024,6 +2176,9 @@ namespace AWJSplitScreen
             _p1InputTransform = null;
             _p2CamRigInited = false;
             _p2CamSmoothedZoom = -1f;
+            _p2ZoomArray = null;
+            _p2ZoomIndex = -1;
+            _p2ManualZoom = Mathf.Clamp(P2CameraDistance, _p1MinZoom, Mathf.Max(_p1MaxZoom, _p1MinZoom + 0.01f));
             _p2CamCollidedDistance = -1f;
             _p2SelfColliders = null;
             _p2SelfColliderRefreshFrame = -1;
@@ -3902,6 +4057,24 @@ namespace AWJSplitScreen
         }
     }
 
+    internal static class CameraZoomPatches
+    {
+        public static bool OnZoom_Prefix(object __0)
+        {
+            if (!SplitScreenMod.FilterP1FromP2Gamepad) return true;
+            if (!SplitScreenMod.P2UseGamepad) return true;
+
+            if (InputCompat.IsCallbackContextFromP2Gamepad(__0, SplitScreenMod.P2GamepadIndex))
+            {
+                if (SplitScreenMod.DebugCameraInput)
+                    MelonLogger.Msg("[CameraZoom] Blocked P2 gamepad OnZoom.");
+                return false;
+            }
+
+            return true;
+        }
+    }
+
     internal static class SpiderInteractionPatches
     {
         private static FieldInfo _bodyMovementField;
@@ -4890,6 +5063,7 @@ namespace AWJSplitScreen
         private static PropertyInfo _leftTriggerProp;
         private static PropertyInfo _leftShoulderProp;
         private static PropertyInfo _buttonWestProp;
+        private static PropertyInfo _rightStickButtonProp;
 
         private static MethodInfo _controlReadValueVec2;
         private static MethodInfo _controlReadValueFloat;
@@ -4941,6 +5115,7 @@ namespace AWJSplitScreen
                 _leftTriggerProp = _gamepadType.GetProperty("leftTrigger", BindingFlags.Public | BindingFlags.Instance);
                 _leftShoulderProp = _gamepadType.GetProperty("leftShoulder", BindingFlags.Public | BindingFlags.Instance);
                 _buttonWestProp = _gamepadType.GetProperty("buttonWest", BindingFlags.Public | BindingFlags.Instance);
+                _rightStickButtonProp = _gamepadType.GetProperty("rightStickButton", BindingFlags.Public | BindingFlags.Instance);
 
                 var vec2Control = Type.GetType("UnityEngine.InputSystem.Controls.Vector2Control, Unity.InputSystem");
                 if (vec2Control != null) _controlReadValueVec2 = vec2Control.GetMethod("ReadValue", BindingFlags.Public | BindingFlags.Instance, null, Type.EmptyTypes, null);
@@ -5279,6 +5454,13 @@ namespace AWJSplitScreen
             var gp = GetGamepadAtIndex(index);
             bool rb = ReadButtonDown(gp, _rightShoulderProp);
             return kb || rb;
+        }
+
+        public static bool IsP2CameraZoomPressedNow(bool useGamepad, int index)
+        {
+            if (!useGamepad) return false;
+            var gp = GetGamepadAtIndex(index);
+            return ReadButtonDown(gp, _rightStickButtonProp);
         }
 
         // === New helpers for full P2 web abilities (Option B). All return "held" booleans;
