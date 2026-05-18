@@ -2768,6 +2768,38 @@ namespace AWJSplitScreen
 
             var savedP1 = new WcCapsule();
             SaveLive(savedP1);
+            // Snapshot the shared webTargetGfx active state. P1 and P2 share the
+            // same Transform/GameObject — when P2's CheckForWebTarget finds no
+            // target in range, the game calls webTargetGfx.gameObject.SetActive(false),
+            // which would hide P1's dot until P1 ran its own pass. Capture
+            // P1's gfx visibility here and restore it in the finally block.
+            GameObject p1GfxGo = null;
+            bool p1GfxActive = false;
+            GameObject p1AnchorGfxGo = null;
+            bool p1AnchorGfxActive = false;
+            try
+            {
+                if (_fWebTargetGfx != null)
+                {
+                    var gfxTr = _fWebTargetGfx.GetValue(_p1WebController) as Transform;
+                    if (gfxTr != null)
+                    {
+                        p1GfxGo = gfxTr.gameObject;
+                        p1GfxActive = p1GfxGo.activeSelf;
+                    }
+                }
+                var anchorGfxField = _wcType?.GetField("webAnchorGfx", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+                if (anchorGfxField != null)
+                {
+                    var anchTr = anchorGfxField.GetValue(_p1WebController) as Transform;
+                    if (anchTr != null)
+                    {
+                        p1AnchorGfxGo = anchTr.gameObject;
+                        p1AnchorGfxActive = p1AnchorGfxGo.activeSelf;
+                    }
+                }
+            }
+            catch { }
             LoadLive(_p2Capsule);
 
             // Mirror BodyMovement / WebStartPoint into the live state for P2 if available
@@ -2832,6 +2864,17 @@ namespace AWJSplitScreen
                 SaveLive(_p2Capsule);
                 // Restore P1.
                 LoadLive(savedP1);
+                // Restore the shared web target/anchor gfx visibility to what
+                // P1 had before the swap. P2 maintains its own _p2TargetDot,
+                // so toggling these only affects P1's reticle.
+                try
+                {
+                    if (p1GfxGo != null && p1GfxGo.activeSelf != p1GfxActive)
+                        p1GfxGo.SetActive(p1GfxActive);
+                    if (p1AnchorGfxGo != null && p1AnchorGfxGo.activeSelf != p1AnchorGfxActive)
+                        p1AnchorGfxGo.SetActive(p1AnchorGfxActive);
+                }
+                catch { }
                 SplitScreenMod.InP2WebContext = false;
                 SplitScreenMod.P2ShootHeld = false;
                 // Restore CameraController.mainCamera field.
