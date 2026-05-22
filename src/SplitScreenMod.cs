@@ -1022,6 +1022,13 @@ namespace AWJSplitScreen
 
             _p2Spider.AddComponent<P2Marker>();
 
+            var p2RootRb = _p2Spider.GetComponent<Rigidbody>();
+            if (p2RootRb != null && p2RootRb.interpolation == RigidbodyInterpolation.None)
+            {
+                p2RootRb.interpolation = RigidbodyInterpolation.Interpolate;
+                LoggerInstance.Msg("Enabled Rigidbody interpolation on P2 spider root.");
+            }
+
             // Destroy P2's LegController + Animation Rigging components.
             // Binary search confirmed LegController on P2 causes P1's leg glitch.
             // Also destroy RigBuilder/Rig so the IK system doesn't fight with our
