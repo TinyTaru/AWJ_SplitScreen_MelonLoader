@@ -76,16 +76,18 @@ namespace AWJSplitScreen
         internal static GameObject _p2Spider;
         private Transform _p1InputTransform;
 
-        private Vector3 _p2CamDir;        // direction from pivot to camera (normalized)
+        private Vector3 _p2CamDir;        // direction from pivot to camera (normalized, derived from yaw/pitch)
         private Vector3 _p2SmoothUp;      // smoothed spider surface up (lerped each frame)
         private float _p2CamDistance;     // current dynamic distance (mirrors Cinemachine3rdPersonFollow.CameraDistance)
         private bool _p2CamRigInited;
         private float _p2CamDebugNextLog;
+        private float _p2CamYaw;
+        private float _p2CamLookY;
 
         // --- Dynamic camera offset (mirrors P1's _Scripts.Camera.CameraZoom logic) ---
         // P1 FollowTarget pins the v-cam follow target at (spider.position + spider.up * 1f)
-        // each FixedUpdate, so the pivot height stays a constant 1.0f along the spider's
-        // surface normal. We replicate that exactly for P2.
+        // each FixedUpdate. Cinemachine3rdPersonFollow then applies an additional
+        // shoulder offset above that target. P2 mirrors both pieces.
         private const float P2CamPivotOffset = 1.0f;
 
         // P1 CameraZoom reflection cache (settings are shared between P1 and P2).
@@ -95,6 +97,10 @@ namespace AWJSplitScreen
         private int _p1ZoomSteps = 6;
         private bool _p1ZoomInWhenLookingUp;
         private bool _p1CameraZoomCached;
+        private bool _p1CameraMouseLookCached;
+        private bool _p1ClampLookY = true;
+        private float _p1MinLookY = -80f;
+        private float _p1MaxLookY = 80f;
 
         // P2 manual zoom mirrors CameraZoom.MobileZoom / OnZoom(button path):
         // CameraZoom.cs builds `zoomArray[zoomSteps]` where each element is:
@@ -129,6 +135,8 @@ namespace AWJSplitScreen
         private float _p2CamCollidedDistance = -1f;          // damped collision-clamped distance
         private Collider[] _p2SelfColliders;                 // cached spider colliders to ignore
         private int _p2SelfColliderRefreshFrame = -1;
+        private float _p2CamShoulderHeight = 3f;
+        private float _p2CamVerticalArm = 0f;
 
         private Component _webController;
         private P2WebManager _p2WebManager;
@@ -1327,12 +1335,12 @@ namespace AWJSplitScreen
             // Mirror P1: orbit is in WORLD space (FollowTarget LookAt's world up,
             // CameraMouseLook yaws on local Y ≈ world up). Only the pivot translates
             // along the spider's surface normal — the orbit itself stays world-aligned.
-            var p2Anchor = P2InputTransform != null ? P2InputTransform : _p2Spider.transform;
+            var p2Anchor = GetP2CameraAnchor();
             _p2SmoothUp = p2Anchor.up;
             var behind = -Vector3.ProjectOnPlane(p2Anchor.forward, Vector3.up).normalized;
             if (behind.sqrMagnitude < 0.001f) behind = Vector3.back;
             // Tilt upward slightly (15 degrees worth) — also in world up.
-            _p2CamDir = (behind + Vector3.up * 0.27f).normalized;
+            SeedP2CameraAngles((behind + Vector3.up * 0.27f).normalized);
 
             // Prime the dynamic distance from P2's own current manual zoom state.
             // The manual preset ladder uses the exact CameraZoom.cs formula, but the
@@ -1353,13 +1361,56 @@ namespace AWJSplitScreen
                 + " camPos=" + _camRightOrBottom.transform.position + " camRot=" + _camRightOrBottom.transform.rotation.eulerAngles);
         }
 
+        private void SeedP2CameraAngles(Vector3 camDir)
+        {
+            if (camDir.sqrMagnitude < 0.001f) camDir = Vector3.back;
+            camDir = camDir.normalized;
+
+            var camForward = -camDir;
+            var flatForward = Vector3.ProjectOnPlane(camForward, Vector3.up);
+            if (flatForward.sqrMagnitude < 0.001f)
+            {
+                flatForward = Vector3.forward;
+            }
+
+            flatForward.Normalize();
+            _p2CamYaw = Mathf.Atan2(flatForward.x, flatForward.z) * Mathf.Rad2Deg;
+
+            var yawOnly = Quaternion.AngleAxis(_p2CamYaw, Vector3.up);
+            var localForward = Quaternion.Inverse(yawOnly) * camForward;
+            _p2CamLookY = -Vector3.SignedAngle(Vector3.forward, localForward, Vector3.right);
+            if (_p1ClampLookY)
+            {
+                _p2CamLookY = Mathf.Clamp(_p2CamLookY, _p1MinLookY, _p1MaxLookY);
+            }
+
+            _p2CamDir = GetP2CameraRotation() * Vector3.back;
+        }
+
+        private Quaternion GetP2CameraRotation()
+        {
+            var yawRot = Quaternion.AngleAxis(_p2CamYaw, Vector3.up);
+            var pitchRot = Quaternion.AngleAxis(-_p2CamLookY, Vector3.right);
+            return yawRot * pitchRot;
+        }
+
+        private Transform GetP2CameraAnchor()
+        {
+            if (_p2Spider != null) return _p2Spider.transform;
+            return P2InputTransform;
+        }
+
         private void ApplyP2CameraTransform()
         {
-            var p2Anchor = P2InputTransform != null ? P2InputTransform : _p2Spider.transform;
+            var p2Anchor = GetP2CameraAnchor();
+            var camRot = GetP2CameraRotation();
+            _p2CamDir = (camRot * Vector3.back).normalized;
 
-            // Pivot above spider along smoothed surface up (matches P1 FollowTarget:
-            // base.transform.position = target.position + target.up).
-            var pivot = p2Anchor.position + _p2SmoothUp * P2CamPivotOffset;
+            // P1's effective orbit center is the spider root lifted by FollowTarget's
+            // +target.up and then by Cinemachine3rdPersonFollow's shoulder offset.
+            var pivot = p2Anchor.position
+                + _p2SmoothUp * (P2CamPivotOffset + _p2CamShoulderHeight)
+                + Vector3.up * _p2CamVerticalArm;
 
             // Mirror Cinemachine3rdPersonFollow built-in collision: shorten _p2CamDistance
             // when an obstacle is in the way, with asymmetric damping (fast in, slow out).
@@ -1368,15 +1419,7 @@ namespace AWJSplitScreen
             // Camera position along the orbit direction
             var desiredPos = pivot + _p2CamDir * effectiveDist;
 
-            // Look ABOVE the pivot so the spider sits in the lower portion of the screen,
-            // matching P1's Cinemachine framing. Screen center then points at the horizon/walls
-            // ahead, which is where the target dot ray (camera.forward) should hit.
-            float lookAbove = effectiveDist * 0.15f;
-            var lookTarget = pivot + Vector3.up * lookAbove;
-            var lookDir = lookTarget - desiredPos;
-            if (lookDir.sqrMagnitude > 0.001f)
-                _camRightOrBottom.transform.rotation = Quaternion.LookRotation(lookDir, Vector3.up);
-            _camRightOrBottom.transform.position = desiredPos;
+            _camRightOrBottom.transform.SetPositionAndRotation(desiredPos, camRot);
         }
 
         // Mirrors Cinemachine3rdPersonFollow's built-in collision: spherecast from the
@@ -1513,38 +1556,20 @@ namespace AWJSplitScreen
             // spider but the camera doesn't roll. _p2SmoothUp remains the smoothed
             // surface normal — used only for the pivot offset and the look-up-zoom
             // dot product (which uses spider.up in P1's CameraZoom).
-            var p2Anchor = P2InputTransform != null ? P2InputTransform : _p2Spider.transform;
+            var p2Anchor = GetP2CameraAnchor();
             _p2SmoothUp = Vector3.Slerp(_p2SmoothUp, p2Anchor.up, dt * 3f).normalized;
             var surfUp = _p2SmoothUp;
-            var worldUp = Vector3.up;
-
-            // Yaw: rotate camera direction around world up.
-            if (Mathf.Abs(yawDelta) > 0.001f)
-                _p2CamDir = Quaternion.AngleAxis(yawDelta, worldUp) * _p2CamDir;
-
-            // Pitch: rotate around the world-horizontal right axis (perpendicular to
-            // worldUp and camDir). Clamp pitch relative to worldUp so the camera
-            // never flips overhead/underneath, matching P1's clampY behavior.
-            if (Mathf.Abs(pitchDelta) > 0.001f)
+            _p2CamYaw += yawDelta;
+            _p2CamLookY += pitchDelta;
+            if (_p1ClampLookY)
             {
-                var right = Vector3.Cross(worldUp, _p2CamDir);
-                if (right.sqrMagnitude > 0.001f)
-                {
-                    right = right.normalized;
-                    var newDir = Quaternion.AngleAxis(pitchDelta, right) * _p2CamDir;
-                    float angleFromUp = Vector3.Angle(newDir, worldUp);
-                    if (angleFromUp > 15f && angleFromUp < 165f)
-                        _p2CamDir = newDir.normalized;
-                }
+                _p2CamLookY = Mathf.Clamp(_p2CamLookY, _p1MinLookY, _p1MaxLookY);
             }
-
-            _p2CamDir = _p2CamDir.normalized;
+            var camRot = GetP2CameraRotation();
+            _p2CamDir = (camRot * Vector3.back).normalized;
 
             // --- True dynamic camera offset (mirrors P1 CameraZoom.HandleCameraZoom) ---
-            // The camera's forward is approximately -_p2CamDir (it looks from desiredPos
-            // back toward the pivot). That's good enough for the zoom-in-when-looking-up
-            // dot product, and avoids a chicken-and-egg with the rotation we set later.
-            _p2CamDistance = ComputeP2DynamicCameraDistance(-_p2CamDir, surfUp, dt);
+            _p2CamDistance = ComputeP2DynamicCameraDistance(camRot * Vector3.forward, surfUp, dt);
 
             ApplyP2CameraTransform();
 
@@ -1603,6 +1628,41 @@ namespace AWJSplitScreen
                     LoggerInstance.Warning("[P2CamDyn] CameraZoom reflection failed: " + ex.Message);
                     _p1CameraZoomCached = true; // don't keep retrying
                 }
+            }
+
+            if (!_p1CameraMouseLookCached)
+            {
+                try
+                {
+                    var cmlType = AccessTools.TypeByName("_Scripts.Camera.CameraMouseLook");
+                    if (cmlType != null)
+                    {
+                        var arr = UnityEngine.Object.FindObjectsOfType(cmlType, true);
+                        if (arr != null && arr.Length > 0)
+                        {
+                            const BindingFlags F = BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public;
+                            var clampYF = cmlType.GetField("clampY", F);
+                            var minYF = cmlType.GetField("minY", F);
+                            var maxYF = cmlType.GetField("maxY", F);
+                            var cameraMouseLook = arr[0];
+                            if (clampYF != null) _p1ClampLookY = (bool)clampYF.GetValue(cameraMouseLook);
+                            if (minYF != null) _p1MinLookY = (float)minYF.GetValue(cameraMouseLook);
+                            if (maxYF != null) _p1MaxLookY = (float)maxYF.GetValue(cameraMouseLook);
+                            LoggerInstance.Msg("[P2CamDyn] P1 CameraMouseLook cached: clampY=" + _p1ClampLookY
+                                + " minY=" + _p1MinLookY.ToString("F2") + " maxY=" + _p1MaxLookY.ToString("F2"));
+                            if (_p2CamRigInited && _p1ClampLookY)
+                            {
+                                _p2CamLookY = Mathf.Clamp(_p2CamLookY, _p1MinLookY, _p1MaxLookY);
+                            }
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    LoggerInstance.Warning("[P2CamDyn] CameraMouseLook reflection failed: " + ex.Message);
+                }
+
+                _p1CameraMouseLookCached = true;
             }
 
             if (_settingsAutoZoomProp == null)
@@ -1723,6 +1783,10 @@ namespace AWJSplitScreen
                         var tagF = followType.GetField("IgnoreTag", F);
                         var dInF = followType.GetField("DampingIntoCollision", F);
                         var dOutF = followType.GetField("DampingFromCollision", F);
+                        var shoulderF = followType.GetField("ShoulderOffset", F) ?? followType.GetField("m_ShoulderOffset", F);
+                        var shoulderP = followType.GetProperty("ShoulderOffset", F);
+                        var verticalArmF = followType.GetField("VerticalArmLength", F) ?? followType.GetField("m_VerticalArmLength", F);
+                        var verticalArmP = followType.GetProperty("VerticalArmLength", F);
                         if (radF != null) _p2CamRadius = Mathf.Max(0.01f, (float)radF.GetValue(follow));
                         if (maskF != null)
                         {
@@ -1733,10 +1797,21 @@ namespace AWJSplitScreen
                         if (tagF != null) _p2CamIgnoreTag = (tagF.GetValue(follow) as string) ?? "";
                         if (dInF != null) _p2CamDampingIn = Mathf.Max(0f, (float)dInF.GetValue(follow));
                         if (dOutF != null) _p2CamDampingOut = Mathf.Max(0f, (float)dOutF.GetValue(follow));
+                        object shoulderObj = shoulderP != null ? shoulderP.GetValue(follow, null) : (shoulderF != null ? shoulderF.GetValue(follow) : null);
+                        if (shoulderObj is Vector3 shoulderOffset)
+                        {
+                            _p2CamShoulderHeight = Mathf.Max(0f, shoulderOffset.magnitude);
+                        }
+                        object verticalArmObj = verticalArmP != null ? verticalArmP.GetValue(follow, null) : (verticalArmF != null ? verticalArmF.GetValue(follow) : null);
+                        if (verticalArmObj is float verticalArm)
+                        {
+                            _p2CamVerticalArm = verticalArm;
+                        }
                         _p1FollowCached = true;
                         LoggerInstance.Msg("[P2CamDyn] P1 3rdPersonFollow collision cached: r=" + _p2CamRadius.ToString("F2")
                             + " mask=" + ((int)_p2CamCollisionMask) + " ignoreTag=\"" + _p2CamIgnoreTag + "\""
-                            + " dampIn=" + _p2CamDampingIn.ToString("F2") + " dampOut=" + _p2CamDampingOut.ToString("F2"));
+                            + " dampIn=" + _p2CamDampingIn.ToString("F2") + " dampOut=" + _p2CamDampingOut.ToString("F2")
+                            + " shoulder=" + _p2CamShoulderHeight.ToString("F2") + " verticalArm=" + _p2CamVerticalArm.ToString("F2"));
                     }
                     catch (Exception ex)
                     {
@@ -2175,6 +2250,8 @@ namespace AWJSplitScreen
 
             _p1InputTransform = null;
             _p2CamRigInited = false;
+            _p2CamYaw = 0f;
+            _p2CamLookY = 0f;
             _p2CamSmoothedZoom = -1f;
             _p2ZoomArray = null;
             _p2ZoomIndex = -1;
