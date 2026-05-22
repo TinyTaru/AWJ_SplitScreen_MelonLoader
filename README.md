@@ -6,6 +6,7 @@ F10 - Flip between horizontal and vertical.
 
 ### Player 2 controller mapping:
 - Move: Left Stick
+- Sprint: Left Stick Click (toggle)
 - Look: Right Stick
 - Shoot: Left Trigger
 - Attach/Grapple: Right Trigger

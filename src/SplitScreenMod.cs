@@ -36,6 +36,7 @@ namespace AWJSplitScreen
         internal static FieldInfo BodyMove_MoveInputField;
         internal static FieldInfo BodyMove_MoveVectorField;
         internal static FieldInfo BodyMove_JumpInputField;
+        internal static FieldInfo BodyMove_SprintInputField;
         internal static MethodInfo BodyMove_InitializeJumpMethod;
 
         private const string Cat = "AWJ_SplitScreen";
@@ -169,7 +170,7 @@ namespace AWJSplitScreen
             SceneManager.sceneLoaded += (_, __) => MelonCoroutines.Start(DeferredSetup());
 
             LoggerInstance.Msg("AWJ Split Screen + P2 Inject v0.2.2 loaded.");
-            LoggerInstance.Msg("F9 split, F10 orientation | P2 Move: IJKL or Gamepad LStick | P2 Look: N/M or RStickX | P2 Zoom: RStick press | P2 Jump: A | P2 Interact: H/X | P2 Web: U/LT shoot, P/RT attach, O/B delete, RightCtrl/RB release.");
+            LoggerInstance.Msg("F9 split, F10 orientation | P2 Move: IJKL or Gamepad LStick | P2 Sprint: LStick click (toggle) | P2 Look: N/M or RStickX | P2 Zoom: RStick press | P2 Jump: A | P2 Interact: H/X | P2 Web: U/LT shoot, P/RT attach, O/B delete, RightCtrl/RB release.");
             LoggerInstance.Msg("Tip: If both controllers still move P1, ensure FilterP1FromP2Gamepad=true and P2_GamepadIndex is the second pad (usually 1).");
         }
 
@@ -204,6 +205,7 @@ namespace AWJSplitScreen
                     BodyMove_MoveInputField = FindBestMoveInputField(bodyMoveType);
                     BodyMove_MoveVectorField = FindFieldByName(bodyMoveType, "moveVector");
                     BodyMove_JumpInputField = FindFieldByName(bodyMoveType, "jumpInput");
+                    BodyMove_SprintInputField = FindFieldByName(bodyMoveType, "sprintInput");
                     BodyMove_InitializeJumpMethod = bodyMoveType.GetMethod("InitializeJump",
                         BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
 
@@ -874,6 +876,9 @@ namespace AWJSplitScreen
                 if (InputCompat.IsP2JumpPressedNow(P2UseGamepad, P2GamepadIndex))
                     P2JumpPressed = true;
 
+                if (InputCompat.IsP2SprintPressedNow(P2UseGamepad, P2GamepadIndex))
+                    TriggerP2SprintToggle();
+
                 // P1 jump bypass: shared jumpInputAction can get stuck in Performed
                 // phase while P2 holds South, suppressing P1's `performed` callback.
                 // Poll P1's input directly and force P1.jumpInput=true in FixedUpdate.
@@ -1317,6 +1322,38 @@ namespace AWJSplitScreen
             catch (Exception ex)
             {
                 LoggerInstance.Warning("[P2Interact] MobileInteract invoke failed (non-fatal): " + ex.Message);
+            }
+        }
+
+        private void TriggerP2SprintToggle()
+        {
+            if (_p2Spider == null || BodyMove_SprintInputField == null)
+                return;
+
+            if (_p2BodyMovement == null)
+            {
+                try
+                {
+                    var bodyMoveType = AccessTools.TypeByName("_Scripts.Spider.BodyMovement");
+                    if (bodyMoveType != null)
+                    {
+                        _p2BodyMovement = _p2Spider.GetComponentInChildren(bodyMoveType, true) as Component;
+                        P2BodyMovementInstance = _p2BodyMovement;
+                    }
+                }
+                catch { }
+            }
+
+            if (_p2BodyMovement == null)
+                return;
+
+            try
+            {
+                BodyMove_SprintInputField.SetValue(_p2BodyMovement, true);
+            }
+            catch (Exception ex)
+            {
+                LoggerInstance.Warning("[P2Sprint] Failed to toggle sprint (non-fatal): " + ex.Message);
             }
         }
 
@@ -5140,6 +5177,7 @@ namespace AWJSplitScreen
         private static PropertyInfo _leftTriggerProp;
         private static PropertyInfo _leftShoulderProp;
         private static PropertyInfo _buttonWestProp;
+        private static PropertyInfo _leftStickButtonProp;
         private static PropertyInfo _rightStickButtonProp;
 
         private static MethodInfo _controlReadValueVec2;
@@ -5192,6 +5230,7 @@ namespace AWJSplitScreen
                 _leftTriggerProp = _gamepadType.GetProperty("leftTrigger", BindingFlags.Public | BindingFlags.Instance);
                 _leftShoulderProp = _gamepadType.GetProperty("leftShoulder", BindingFlags.Public | BindingFlags.Instance);
                 _buttonWestProp = _gamepadType.GetProperty("buttonWest", BindingFlags.Public | BindingFlags.Instance);
+                _leftStickButtonProp = _gamepadType.GetProperty("leftStickButton", BindingFlags.Public | BindingFlags.Instance);
                 _rightStickButtonProp = _gamepadType.GetProperty("rightStickButton", BindingFlags.Public | BindingFlags.Instance);
 
                 var vec2Control = Type.GetType("UnityEngine.InputSystem.Controls.Vector2Control, Unity.InputSystem");
@@ -5538,6 +5577,13 @@ namespace AWJSplitScreen
             if (!useGamepad) return false;
             var gp = GetGamepadAtIndex(index);
             return ReadButtonDown(gp, _rightStickButtonProp);
+        }
+
+        public static bool IsP2SprintPressedNow(bool useGamepad, int index)
+        {
+            if (!useGamepad) return false;
+            var gp = GetGamepadAtIndex(index);
+            return ReadButtonDown(gp, _leftStickButtonProp);
         }
 
         // === New helpers for full P2 web abilities (Option B). All return "held" booleans;
