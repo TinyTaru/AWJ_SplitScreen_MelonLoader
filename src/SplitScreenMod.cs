@@ -5171,8 +5171,6 @@ namespace AWJSplitScreen
         // Gamepad reflection
         private static Type _gamepadType;
         private static PropertyInfo _gamepadAllProp;
-        private static MethodInfo _readOnlyArrayGetItem;
-        private static PropertyInfo _readOnlyArrayCountProp;
 
         private static PropertyInfo _leftStickProp;
         private static PropertyInfo _rightStickProp;
@@ -5195,6 +5193,22 @@ namespace AWJSplitScreen
         private static PropertyInfo _ctxControlProp;
         private static PropertyInfo _controlDeviceProp;
         private static PropertyInfo _inputDeviceDeviceIdProp;
+
+        private static Type _readOnlyArrayRuntimeType;
+        private static PropertyInfo _readOnlyArrayRuntimeCountProp;
+        private static MethodInfo _readOnlyArrayRuntimeGetItem;
+        private static readonly object[] _readOnlyArrayIndexArgs = new object[1];
+        private static object[] _gamepadSnapshot = Array.Empty<object>();
+        private static int _gamepadSnapshotCount;
+        private static int _gamepadSnapshotFrame = -1;
+
+        private static int _boundP2Index = int.MinValue;
+        private static int _boundP2DeviceId = int.MinValue;
+        private static object _boundP2Gamepad;
+        private static int _boundP2ResolvedFrame = -1;
+        private static object _boundP2GamepadThisFrame;
+        private static int _boundP2MissingFrames;
+        private const int P2RebindAfterMissingFrames = 120;
 
         public static void Init(MelonLogger.Instance logger)
         {
@@ -5219,13 +5233,6 @@ namespace AWJSplitScreen
             if (_gamepadType != null)
             {
                 _gamepadAllProp = _gamepadType.GetProperty("all", BindingFlags.Public | BindingFlags.Static);
-
-                var roType = Type.GetType("UnityEngine.InputSystem.Utilities.ReadOnlyArray`1, Unity.InputSystem");
-                if (roType != null)
-                {
-                    _readOnlyArrayGetItem = roType.GetMethod("get_Item", BindingFlags.Public | BindingFlags.Instance);
-                    _readOnlyArrayCountProp = roType.GetProperty("Count", BindingFlags.Public | BindingFlags.Instance);
-                }
 
                 _leftStickProp = _gamepadType.GetProperty("leftStick", BindingFlags.Public | BindingFlags.Instance);
                 _rightStickProp = _gamepadType.GetProperty("rightStick", BindingFlags.Public | BindingFlags.Instance);
@@ -5334,33 +5341,212 @@ namespace AWJSplitScreen
         public static bool Held_N() { return Held("nKey", KeyCode.N); }
         public static bool Held_M() { return Held("mKey", KeyCode.M); }
 
+        private static void RefreshGamepadSnapshot()
+        {
+            try
+            {
+                int frame = Time.frameCount;
+                if (_gamepadSnapshotFrame == frame) return;
+
+                _gamepadSnapshotFrame = frame;
+
+                int oldCount = _gamepadSnapshotCount;
+                _gamepadSnapshotCount = 0;
+
+                if (_gamepadType == null || _gamepadAllProp == null) return;
+
+                var ro = _gamepadAllProp.GetValue(null, null);
+                if (ro == null) return;
+
+                var roRuntimeType = ro.GetType();
+                if (!object.ReferenceEquals(_readOnlyArrayRuntimeType, roRuntimeType))
+                {
+                    _readOnlyArrayRuntimeType = roRuntimeType;
+                    _readOnlyArrayRuntimeCountProp = roRuntimeType.GetProperty("Count", BindingFlags.Public | BindingFlags.Instance);
+                    _readOnlyArrayRuntimeGetItem = roRuntimeType.GetMethod("get_Item", BindingFlags.Public | BindingFlags.Instance);
+                }
+
+                if (_readOnlyArrayRuntimeCountProp == null || _readOnlyArrayRuntimeGetItem == null) return;
+
+                var countObj = _readOnlyArrayRuntimeCountProp.GetValue(ro, null);
+                int count = countObj is int ? (int)countObj : 0;
+                if (count <= 0)
+                {
+                    for (int i = 0; i < oldCount && i < _gamepadSnapshot.Length; i++)
+                        _gamepadSnapshot[i] = null;
+                    return;
+                }
+
+                if (_gamepadSnapshot.Length < count)
+                    _gamepadSnapshot = new object[count];
+
+                for (int i = 0; i < count; i++)
+                {
+                    _readOnlyArrayIndexArgs[0] = i;
+                    _gamepadSnapshot[i] = _readOnlyArrayRuntimeGetItem.Invoke(ro, _readOnlyArrayIndexArgs);
+                }
+
+                for (int i = count; i < oldCount && i < _gamepadSnapshot.Length; i++)
+                    _gamepadSnapshot[i] = null;
+
+                _gamepadSnapshotCount = count;
+            }
+            catch
+            {
+                _gamepadSnapshotCount = 0;
+            }
+        }
+
+        private static bool TryReadDeviceId(object device, out int deviceId)
+        {
+            deviceId = int.MinValue;
+
+            try
+            {
+                if (device == null) return false;
+
+                var devIdProp = _inputDeviceDeviceIdProp;
+                if (devIdProp == null || !devIdProp.DeclaringType.IsAssignableFrom(device.GetType()))
+                    devIdProp = device.GetType().GetProperty("deviceId", BindingFlags.Public | BindingFlags.Instance);
+                if (devIdProp == null) return false;
+
+                var raw = devIdProp.GetValue(device, null);
+                if (raw is int)
+                {
+                    deviceId = (int)raw;
+                    return true;
+                }
+
+                if (raw != null)
+                    return int.TryParse(raw.ToString(), out deviceId);
+            }
+            catch { }
+
+            return false;
+        }
+
+        private static bool SnapshotContainsReference(object gamepad)
+        {
+            if (gamepad == null) return false;
+
+            for (int i = 0; i < _gamepadSnapshotCount; i++)
+            {
+                if (object.ReferenceEquals(_gamepadSnapshot[i], gamepad))
+                    return true;
+            }
+
+            return false;
+        }
+
+        private static object FindSnapshotGamepadByDeviceId(int deviceId)
+        {
+            if (deviceId == int.MinValue) return null;
+
+            for (int i = 0; i < _gamepadSnapshotCount; i++)
+            {
+                var gp = _gamepadSnapshot[i];
+                int currentId;
+                if (TryReadDeviceId(gp, out currentId) && currentId == deviceId)
+                    return gp;
+            }
+
+            return null;
+        }
+
+        private static void ClearP2GamepadBinding()
+        {
+            _boundP2Index = int.MinValue;
+            _boundP2DeviceId = int.MinValue;
+            _boundP2Gamepad = null;
+            _boundP2ResolvedFrame = -1;
+            _boundP2GamepadThisFrame = null;
+            _boundP2MissingFrames = 0;
+        }
+
+        private static object BindP2Gamepad(int index, object gamepad)
+        {
+            _boundP2Index = index;
+            _boundP2Gamepad = gamepad;
+            _boundP2DeviceId = int.MinValue;
+            _boundP2MissingFrames = 0;
+
+            int deviceId;
+            if (TryReadDeviceId(gamepad, out deviceId))
+                _boundP2DeviceId = deviceId;
+
+            return gamepad;
+        }
+
         private static object GetGamepadAtIndex(int index)
         {
             try
             {
-                if (_gamepadType == null || _gamepadAllProp == null) return null;
-
-                var ro = _gamepadAllProp.GetValue(null, null);
-                if (ro == null) return null;
-
-                var roRuntimeType = ro.GetType();
-                var countProp = _readOnlyArrayCountProp;
-                if (countProp == null || !countProp.DeclaringType.IsAssignableFrom(roRuntimeType))
-                    countProp = roRuntimeType.GetProperty("Count", BindingFlags.Public | BindingFlags.Instance);
-
-                var itemGetter = _readOnlyArrayGetItem;
-                if (itemGetter == null || !itemGetter.DeclaringType.IsAssignableFrom(roRuntimeType))
-                    itemGetter = roRuntimeType.GetMethod("get_Item", BindingFlags.Public | BindingFlags.Instance);
-
-                if (countProp == null || itemGetter == null) return null;
-
-                var countObj = countProp.GetValue(ro, null);
-                int count = countObj is int ? (int)countObj : 0;
+                RefreshGamepadSnapshot();
+                int count = _gamepadSnapshotCount;
                 if (index < 0 || index >= count) return null;
-
-                return itemGetter.Invoke(ro, new object[] { index });
+                return _gamepadSnapshot[index];
             }
             catch { return null; }
+        }
+
+        private static object GetP2Gamepad(int index)
+        {
+            try
+            {
+                // Bind P2 to the originally selected device so a temporary reshuffle of
+                // Gamepad.all doesn't silently move P2 over to a different controller.
+                if (_boundP2Index != index)
+                    ClearP2GamepadBinding();
+
+                int frame = Time.frameCount;
+                if (_boundP2ResolvedFrame == frame)
+                    return _boundP2GamepadThisFrame;
+
+                RefreshGamepadSnapshot();
+
+                object resolved = null;
+
+                if (_boundP2DeviceId != int.MinValue)
+                    resolved = FindSnapshotGamepadByDeviceId(_boundP2DeviceId);
+
+                if (resolved == null && SnapshotContainsReference(_boundP2Gamepad))
+                    resolved = _boundP2Gamepad;
+
+                bool hasExistingBinding = _boundP2Gamepad != null || _boundP2DeviceId != int.MinValue;
+                if (resolved == null)
+                {
+                    if (!hasExistingBinding)
+                    {
+                        resolved = BindP2Gamepad(index, GetGamepadAtIndex(index));
+                    }
+                    else if (++_boundP2MissingFrames >= P2RebindAfterMissingFrames)
+                    {
+                        resolved = BindP2Gamepad(index, GetGamepadAtIndex(index));
+                    }
+                }
+                else
+                {
+                    _boundP2MissingFrames = 0;
+
+                    int resolvedDeviceId;
+                    if (_boundP2DeviceId == int.MinValue || !object.ReferenceEquals(resolved, _boundP2Gamepad))
+                    {
+                        if (TryReadDeviceId(resolved, out resolvedDeviceId))
+                        {
+                            _boundP2DeviceId = resolvedDeviceId;
+                            _boundP2Gamepad = resolved;
+                        }
+                    }
+                }
+
+                _boundP2ResolvedFrame = frame;
+                _boundP2GamepadThisFrame = resolved;
+                return resolved;
+            }
+            catch
+            {
+                return null;
+            }
         }
 
         private static Vector2 ReadStick(object gamepad, PropertyInfo stickProp)
@@ -5406,7 +5592,7 @@ namespace AWJSplitScreen
 
         public static Vector2 GetP2LeftStick(int index, float deadzone)
         {
-            var gp = GetGamepadAtIndex(index);
+            var gp = GetP2Gamepad(index);
             var v = ReadStick(gp, _leftStickProp);
             if (v.magnitude < deadzone) return Vector2.zero;
             return v;
@@ -5420,7 +5606,7 @@ namespace AWJSplitScreen
 
         public static Vector2 GetP2RightStick(int index, float deadzone)
         {
-            var gp = GetGamepadAtIndex(index);
+            var gp = GetP2Gamepad(index);
             var v = ReadStick(gp, _rightStickProp);
             if (v.magnitude < deadzone) return Vector2.zero;
             return v;
@@ -5471,7 +5657,7 @@ namespace AWJSplitScreen
             bool kb = Held(kbProp, kbFallback);
             if (!useGamepad) return kb;
 
-            var gp = GetGamepadAtIndex(index);
+            var gp = GetP2Gamepad(index);
             // RT is reserved for grapple/attach. Keep shoot on LT so the two systems
             // cannot fire simultaneously from the same trigger.
             float lt = ReadAxis(gp, _leftTriggerProp);
@@ -5482,7 +5668,7 @@ namespace AWJSplitScreen
         {
             bool kb = Down("backslashKey", KeyCode.Backslash);
             if (!useGamepad) return kb;
-            var gp = GetGamepadAtIndex(index);
+            var gp = GetP2Gamepad(index);
             bool south = ReadButtonDown(gp, _buttonSouthProp);
             return kb || south;
         }
@@ -5516,7 +5702,7 @@ namespace AWJSplitScreen
             // Iterate gamepads 0..MAX via the proven GetGamepadAtIndex path
             // (don't reinvent ReadOnlyArray reflection — use the cached one).
             const int MaxGamepads = 8;
-            var p2gp = GetGamepadAtIndex(p2Index);
+            var p2gp = GetP2Gamepad(p2Index);
             for (int i = 0; i < MaxGamepads; i++)
             {
                 if (i == p2Index) continue;
@@ -5533,7 +5719,7 @@ namespace AWJSplitScreen
             bool kb = Down(kbProp, kbFallback);
             if (!useGamepad) return kb;
 
-            var gp = GetGamepadAtIndex(index);
+            var gp = GetP2Gamepad(index);
             bool west = ReadButtonDown(gp, _buttonWestProp);
             return kb || west;
         }
@@ -5543,7 +5729,7 @@ namespace AWJSplitScreen
             bool kb = Held(kbProp, kbFallback);
             if (!useGamepad) return kb;
 
-            var gp = GetGamepadAtIndex(index);
+            var gp = GetP2Gamepad(index);
             float rt = ReadAxis(gp, _rightTriggerProp);
             return kb || (rt >= triggerThreshold);
         }
@@ -5553,7 +5739,7 @@ namespace AWJSplitScreen
             bool kb = Down(kbProp, kbFallback);
             if (!useGamepad) return kb;
 
-            var gp = GetGamepadAtIndex(index);
+            var gp = GetP2Gamepad(index);
             float rt = ReadAxis(gp, _rightTriggerProp);
             // Treat trigger as "pressed" when it crosses threshold — callers track edge themselves
             return kb || (rt >= 0.35f);
@@ -5564,7 +5750,7 @@ namespace AWJSplitScreen
             bool kb = Down(kbProp, kbFallback);
             if (!useGamepad) return kb;
 
-            var gp = GetGamepadAtIndex(index);
+            var gp = GetP2Gamepad(index);
             bool b = ReadButtonDown(gp, _buttonEastProp);
             return kb || b;
         }
@@ -5574,7 +5760,7 @@ namespace AWJSplitScreen
             bool kb = Down(kbProp, kbFallback);
             if (!useGamepad) return kb;
 
-            var gp = GetGamepadAtIndex(index);
+            var gp = GetP2Gamepad(index);
             bool rb = ReadButtonDown(gp, _rightShoulderProp);
             return kb || rb;
         }
@@ -5582,14 +5768,14 @@ namespace AWJSplitScreen
         public static bool IsP2CameraZoomPressedNow(bool useGamepad, int index)
         {
             if (!useGamepad) return false;
-            var gp = GetGamepadAtIndex(index);
+            var gp = GetP2Gamepad(index);
             return ReadButtonDown(gp, _rightStickButtonProp);
         }
 
         public static bool IsP2SprintPressedNow(bool useGamepad, int index)
         {
             if (!useGamepad) return false;
-            var gp = GetGamepadAtIndex(index);
+            var gp = GetP2Gamepad(index);
             return ReadButtonDown(gp, _leftStickButtonProp);
         }
 
@@ -5601,7 +5787,7 @@ namespace AWJSplitScreen
         {
             bool kb = !string.IsNullOrEmpty(kbProp) && Held(kbProp, kbFallback);
             if (!useGamepad) return kb || (kbFallback != KeyCode.None && SafeKey(kbFallback));
-            var gp = GetGamepadAtIndex(index);
+            var gp = GetP2Gamepad(index);
             float rt = ReadAxis(gp, _rightTriggerProp);
             return kb || (rt >= triggerThreshold);
         }
@@ -5611,7 +5797,7 @@ namespace AWJSplitScreen
         {
             bool kb = !string.IsNullOrEmpty(kbProp) && Held(kbProp, kbFallback);
             if (!useGamepad) return kb || (kbFallback != KeyCode.None && SafeKey(kbFallback));
-            var gp = GetGamepadAtIndex(index);
+            var gp = GetP2Gamepad(index);
             float lt = ReadAxis(gp, _leftTriggerProp);
             return kb || (lt >= triggerThreshold);
         }
@@ -5621,7 +5807,7 @@ namespace AWJSplitScreen
         {
             bool kb = !string.IsNullOrEmpty(kbProp) && Held(kbProp, kbFallback);
             if (!useGamepad) return kb || (kbFallback != KeyCode.None && SafeKey(kbFallback));
-            var gp = GetGamepadAtIndex(index);
+            var gp = GetP2Gamepad(index);
             return kb || ReadButtonHeld(gp, _rightShoulderProp);
         }
 
@@ -5630,7 +5816,7 @@ namespace AWJSplitScreen
         {
             bool kb = !string.IsNullOrEmpty(kbProp) && Held(kbProp, kbFallback);
             if (!useGamepad) return kb || (kbFallback != KeyCode.None && SafeKey(kbFallback));
-            var gp = GetGamepadAtIndex(index);
+            var gp = GetP2Gamepad(index);
             return kb || ReadButtonHeld(gp, _leftShoulderProp);
         }
 
@@ -5639,7 +5825,7 @@ namespace AWJSplitScreen
         {
             bool kb = !string.IsNullOrEmpty(kbProp) && Held(kbProp, kbFallback);
             if (!useGamepad) return kb || (kbFallback != KeyCode.None && SafeKey(kbFallback));
-            var gp = GetGamepadAtIndex(index);
+            var gp = GetP2Gamepad(index);
             return kb || ReadButtonHeld(gp, _buttonEastProp);
         }
 
@@ -5672,7 +5858,7 @@ namespace AWJSplitScreen
             {
                 if (ctx == null) return false;
 
-                var gp = GetGamepadAtIndex(p2Index);
+                var gp = GetP2Gamepad(p2Index);
                 if (gp == null) return false;
 
                 var ctxControlProp = _ctxControlProp;
