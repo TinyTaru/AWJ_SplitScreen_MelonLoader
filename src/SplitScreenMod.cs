@@ -22,7 +22,6 @@ namespace AWJSplitScreen
         internal static float P2TriggerThreshold = 0.35f;
         internal static bool FilterP1FromP2Gamepad = true;
         internal static float P2CameraDistance = 5.6f;
-        internal static bool DebugCameraInput = false;
 
         internal static bool P2ShootHeld;              // computed each frame & from WebController.Update prefix
         internal static bool P2JumpPressed;            // set in OnUpdate, consumed in FixedUpdate
@@ -54,7 +53,6 @@ namespace AWJSplitScreen
         private static MelonPreferences_Entry<float> _p2TriggerThresholdPref;
         private static MelonPreferences_Entry<bool> _filterP1FromP2PadPref;
         private static MelonPreferences_Entry<float> _p2CameraDistancePref;
-        private static MelonPreferences_Entry<bool> _debugCameraInputPref;
 
         // P2 keyboard fallback keys
         private const string P2JumpKeyProp = "spaceKey";
@@ -81,7 +79,6 @@ namespace AWJSplitScreen
         private Vector3 _p2SmoothUp;      // smoothed spider surface up (lerped each frame)
         private float _p2CamDistance;     // current dynamic distance (mirrors Cinemachine3rdPersonFollow.CameraDistance)
         private bool _p2CamRigInited;
-        private float _p2CamDebugNextLog;
         private float _p2CamYaw;
         private float _p2CamLookY;
 
@@ -160,7 +157,6 @@ namespace AWJSplitScreen
             _p2TriggerThresholdPref = _prefs.CreateEntry("P2_TriggerThreshold", 0.35f, "Trigger threshold for shooting");
             _filterP1FromP2PadPref = _prefs.CreateEntry("FilterP1FromP2Gamepad", true, "Prevent P1 from reacting to P2's gamepad (recommended for 2-controller play)");
             _p2CameraDistancePref = _prefs.CreateEntry("P2_CameraDistance", 8.0f, "P2 third-person camera distance");
-            _debugCameraInputPref = _prefs.CreateEntry("DebugCameraInput", false, "Enable camera input debug logs");
 
             ApplyPrefsToStatics();
 
@@ -182,7 +178,6 @@ namespace AWJSplitScreen
             P2TriggerThreshold = _p2TriggerThresholdPref.Value;
             FilterP1FromP2Gamepad = _filterP1FromP2PadPref.Value;
             P2CameraDistance = Mathf.Clamp(_p2CameraDistancePref.Value, 1.0f, 14f);
-            DebugCameraInput = _debugCameraInputPref.Value;
         }
 
         public override void OnDeinitializeMelon()
@@ -328,23 +323,6 @@ namespace AWJSplitScreen
                 var webType = AccessTools.TypeByName("_Scripts.Singletons.WebController");
                 if (webType != null)
                 {
-                    // Dump all properties and methods for diagnostics
-                    var allProps = webType.GetProperties(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-                    LoggerInstance.Msg("[WebController] Properties (" + allProps.Length + "):");
-                    for (int i = 0; i < allProps.Length; i++)
-                        LoggerInstance.Msg("  prop: " + allProps[i].Name + " -> " + allProps[i].PropertyType.Name);
-
-                    var allMethods = webType.GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly);
-                    LoggerInstance.Msg("[WebController] Methods (" + allMethods.Length + "):");
-                    for (int i = 0; i < allMethods.Length; i++)
-                    {
-                        var prms = allMethods[i].GetParameters();
-                        string pStr = "";
-                        for (int j = 0; j < prms.Length; j++)
-                            pStr += (j > 0 ? ", " : "") + prms[j].ParameterType.Name + " " + prms[j].Name;
-                        LoggerInstance.Msg("  method: " + allMethods[i].Name + "(" + pStr + ") -> " + allMethods[i].ReturnType.Name);
-                    }
-
                     // NOTE: We intentionally do NOT patch Update/FixedUpdate with a P2ShootHeld setter.
                     // P2WebManager sets context flags only around its own explicit invocations
                     // so P1's targeting is never corrupted.
@@ -352,7 +330,6 @@ namespace AWJSplitScreen
                     // Try property getter first, then direct method
                     var getStart = AccessTools.PropertyGetter(webType, "WebStartPoint");
                     if (getStart == null) getStart = AccessTools.Method(webType, "get_WebStartPoint");
-                    LoggerInstance.Msg("[WebController] get_WebStartPoint: " + (getStart != null) + (getStart != null ? " ret=" + getStart.ReturnType.Name : ""));
                     if (getStart != null)
                     {
                         if (getStart.ReturnType == typeof(Transform))
@@ -363,7 +340,6 @@ namespace AWJSplitScreen
 
                     var getDir = AccessTools.PropertyGetter(webType, "WebDirection");
                     if (getDir == null) getDir = AccessTools.Method(webType, "get_WebDirection");
-                    LoggerInstance.Msg("[WebController] get_WebDirection: " + (getDir != null) + (getDir != null ? " ret=" + getDir.ReturnType.Name : ""));
                     if (getDir != null && getDir.ReturnType == typeof(Vector3))
                         h.Patch(getDir, prefix: new HarmonyMethod(typeof(WebControllerPatches), nameof(WebControllerPatches.WebDirectionVector3_Prefix)));
 
@@ -394,13 +370,8 @@ namespace AWJSplitScreen
                     try
                     {
                         var checkForWebTarget = AccessTools.Method(webType, "CheckForWebTarget");
-                        LoggerInstance.Msg("[WebController] CheckForWebTarget: " + (checkForWebTarget != null)
-                            + (checkForWebTarget != null ? " ret=" + checkForWebTarget.ReturnType.Name + " params=" + checkForWebTarget.GetParameters().Length : ""));
                         if (checkForWebTarget != null)
-                        {
                             h.Patch(checkForWebTarget, prefix: new HarmonyMethod(typeof(WebControllerPatches), nameof(WebControllerPatches.CheckForWebTarget_Prefix)));
-                            LoggerInstance.Msg("Patched WebController.CheckForWebTarget.");
-                        }
                     }
                     catch (Exception exCfwt)
                     {
@@ -883,14 +854,7 @@ namespace AWJSplitScreen
                 // phase while P2 holds South, suppressing P1's `performed` callback.
                 // Poll P1's input directly and force P1.jumpInput=true in FixedUpdate.
                 if (InputCompat.IsP1JumpPressedNow(P2GamepadIndex))
-                {
                     P1JumpPressed = true;
-                    if (!BodyMovementPatches._p1JumpPollLogged)
-                    {
-                        BodyMovementPatches._p1JumpPollLogged = true;
-                        try { LoggerInstance.Msg("[P1JumpBypass] IsP1JumpPressedNow detected press (first time). JumpInputField=" + (BodyMove_JumpInputField != null ? BodyMove_JumpInputField.Name : "NULL") + ", P1BodyMovement=" + (P1BodyMovementInstance != null ? "ok" : "NULL")); } catch { }
-                    }
-                }
 
                 if (InputCompat.IsP2InteractPressedNow(P2UseGamepad, P2GamepadIndex, P2InteractKeyProp, P2InteractKeyFallback))
                     TriggerP2Interact();
@@ -941,21 +905,6 @@ namespace AWJSplitScreen
 
             DisableComponentByTypeName(_camRightOrBottom.gameObject, "Cinemachine.CinemachineBrain");
             DisableCameraDriverBehaviours(_camRightOrBottom.gameObject);
-
-            // DEBUG: dump every component still on the P2 camera clone
-            try
-            {
-                var allComps = _camRightOrBottom.GetComponentsInChildren<Component>(true);
-                LoggerInstance.Msg("[P2CamDebug] Components on P2 camera clone (" + allComps.Length + "):");
-                for (int i = 0; i < allComps.Length; i++)
-                {
-                    if (allComps[i] == null) continue;
-                    var b = allComps[i] as Behaviour;
-                    string en = b != null ? (b.enabled ? "ON" : "OFF") : "n/a";
-                    LoggerInstance.Msg("  [" + i + "] " + allComps[i].GetType().FullName + " enabled=" + en + " go=" + allComps[i].gameObject.name);
-                }
-            }
-            catch (Exception ex) { LoggerInstance.Warning("[P2CamDebug] component dump failed: " + ex); }
 
             P2Camera = _camRightOrBottom;
 
@@ -1367,11 +1316,8 @@ namespace AWJSplitScreen
         private void InitP2CameraRig()
         {
             if (_camRightOrBottom == null || (P2InputTransform == null && _p2Spider == null))
-            {
-                LoggerInstance.Msg("[P2CamDebug] InitP2CameraRig BAIL: camR=" + (_camRightOrBottom != null)
-                    + " P2IT=" + (P2InputTransform != null) + " p2Spider=" + (_p2Spider != null));
                 return;
-            }
+            
 
             EnsureCameraDynamicsCached();
 
@@ -1396,13 +1342,6 @@ namespace AWJSplitScreen
 
             _p2CamRigInited = true;
             ApplyP2CameraTransform();
-
-            LoggerInstance.Msg("[P2CamDebug] InitP2CameraRig done: dist=" + _p2CamDistance.ToString("F2")
-                + " pivotOffset=" + P2CamPivotOffset.ToString("F2")
-                + " camDir=" + _p2CamDir
-                + " p1MinZoom=" + _p1MinZoom.ToString("F2") + " p1MaxZoom=" + _p1MaxZoom.ToString("F2")
-                + " p1ZoomInUp=" + _p1ZoomInWhenLookingUp
-                + " camPos=" + _camRightOrBottom.transform.position + " camRot=" + _camRightOrBottom.transform.rotation.eulerAngles);
         }
 
         private void SeedP2CameraAngles(Vector3 camDir)
@@ -1616,22 +1555,6 @@ namespace AWJSplitScreen
             _p2CamDistance = ComputeP2DynamicCameraDistance(camRot * Vector3.forward, surfUp, dt);
 
             ApplyP2CameraTransform();
-
-            // Throttled debug log every 2 seconds
-            if (Time.unscaledTime >= _p2CamDebugNextLog)
-            {
-                _p2CamDebugNextLog = Time.unscaledTime + 2f;
-                var wantPos = _camRightOrBottom.transform.position;
-                var delta = (prePos - wantPos).magnitude;
-                LoggerInstance.Msg("[P2CamDebug] UpdateP2CameraLook:"
-                    + " anchor=" + p2Anchor.name + " anchorPos=" + p2Anchor.position
-                    + " surfUp=" + surfUp + " camDir=" + _p2CamDir
-                    + " dist=" + _p2CamDistance.ToString("F2") + " smoothedZoom=" + _p2CamSmoothedZoom.ToString("F2")
-                    + " pivotOff=" + P2CamPivotOffset.ToString("F2")
-                    + " | prePos=" + prePos + " wantPos=" + wantPos + " preDelta=" + delta.ToString("F3")
-                    + " | wantRot=" + _camRightOrBottom.transform.rotation.eulerAngles
-                    + " | p1CamPos=" + (_camLeftOrTop != null ? _camLeftOrTop.transform.position.ToString() : "null"));
-            }
         }
 
         // Lazily caches the P1 _Scripts.Camera.CameraZoom instance + private field info,
@@ -1659,9 +1582,6 @@ namespace AWJSplitScreen
                             if (maxF != null) _p1MaxZoom = (float)maxF.GetValue(_p1CameraZoom);
                             if (stepsF != null) _p1ZoomSteps = Mathf.Max(2, (int)stepsF.GetValue(_p1CameraZoom));
                             if (zupF != null) _p1ZoomInWhenLookingUp = (bool)zupF.GetValue(_p1CameraZoom);
-                            LoggerInstance.Msg("[P2CamDyn] P1 CameraZoom cached: min=" + _p1MinZoom.ToString("F2")
-                                + " max=" + _p1MaxZoom.ToString("F2") + " steps=" + _p1ZoomSteps
-                                + " zoomInUp=" + _p1ZoomInWhenLookingUp);
                             RebuildP2ZoomArray();
                             _p1CameraZoomCached = true;
                         }
@@ -1692,8 +1612,6 @@ namespace AWJSplitScreen
                             if (clampYF != null) _p1ClampLookY = (bool)clampYF.GetValue(cameraMouseLook);
                             if (minYF != null) _p1MinLookY = (float)minYF.GetValue(cameraMouseLook);
                             if (maxYF != null) _p1MaxLookY = (float)maxYF.GetValue(cameraMouseLook);
-                            LoggerInstance.Msg("[P2CamDyn] P1 CameraMouseLook cached: clampY=" + _p1ClampLookY
-                                + " minY=" + _p1MinLookY.ToString("F2") + " maxY=" + _p1MaxLookY.ToString("F2"));
                             if (_p2CamRigInited && _p1ClampLookY)
                             {
                                 _p2CamLookY = Mathf.Clamp(_p2CamLookY, _p1MinLookY, _p1MaxLookY);
@@ -1770,9 +1688,6 @@ namespace AWJSplitScreen
                         {
                             try { _bmWalkingState = Enum.Parse(msType, "Walking"); } catch { }
                         }
-                        LoggerInstance.Msg("[P2CamDyn] P2 BodyMovement cached: bm=" + (_p2BodyMovement != null)
-                            + " Rb=" + (_bmRbProp != null) + " State=" + (_bmStateProp != null)
-                            + " WebTouched=" + (_bmWebTouchedProp != null) + " walking=" + (_bmWalkingState != null));
                     }
                 }
                 catch (Exception ex)
@@ -1852,10 +1767,6 @@ namespace AWJSplitScreen
                             _p2CamVerticalArm = verticalArm;
                         }
                         _p1FollowCached = true;
-                        LoggerInstance.Msg("[P2CamDyn] P1 3rdPersonFollow collision cached: r=" + _p2CamRadius.ToString("F2")
-                            + " mask=" + ((int)_p2CamCollisionMask) + " ignoreTag=\"" + _p2CamIgnoreTag + "\""
-                            + " dampIn=" + _p2CamDampingIn.ToString("F2") + " dampOut=" + _p2CamDampingOut.ToString("F2")
-                            + " shoulder=" + _p2CamShoulderHeight.ToString("F2") + " verticalArm=" + _p2CamVerticalArm.ToString("F2"));
                     }
                     catch (Exception ex)
                     {
@@ -1959,8 +1870,6 @@ namespace AWJSplitScreen
             }
             catch { }
 
-            LoggerInstance.Msg("[P2CamZoom] Preset " + (_p2ZoomIndex + 1) + "/" + _p2ZoomArray.Length
-                + " -> " + _p2ManualZoom.ToString("F2"));
         }
 
         // Resolves P1's Cinemachine3rdPersonFollow body component on the follow vcam.
@@ -2164,7 +2073,6 @@ namespace AWJSplitScreen
             if (root == null)
                 return;
 
-            int disabled = 0;
             var behaviours = root.GetComponentsInChildren<Behaviour>(true);
             if (behaviours == null)
                 return;
@@ -2183,14 +2091,8 @@ namespace AWJSplitScreen
                     fullName.StartsWith("_Scripts.Singletons.", StringComparison.Ordinal) ||
                     fullName.IndexOf("Camera", StringComparison.OrdinalIgnoreCase) >= 0 ||
                     string.Equals(fullName, "Cinemachine.CinemachineBrain", StringComparison.Ordinal))
-                {
                     behaviour.enabled = false;
-                    disabled++;
-                    LoggerInstance.Msg("[P2CamDebug] DISABLED behaviour: " + fullName + " on " + behaviour.gameObject.name);
-                }
             }
-
-            LoggerInstance.Msg("[P2CamDebug] Disabled " + disabled + " camera driver behaviour(s) on P2 camera clone.");
         }
 
         private static void DestroyComponentByTypeName(GameObject root, string fullTypeName)
@@ -2404,7 +2306,6 @@ namespace AWJSplitScreen
 
         // P2 grapple/web visuals (driven by P2's WcCapsule state, not a custom SpringJoint)
         private LineRenderer _grappleLine;
-        private LineRenderer _shootLine;   // preview line while shoot button held (mirrors P1's IndicateWeb)
         private float _grappleMaxDist = 50f;
 
         // P1-derived parameters (read via reflection/logging)
@@ -2431,7 +2332,6 @@ namespace AWJSplitScreen
         private bool _inited;
         private MelonLogger.Instance _logger;
         private float _nextDebugLog;
-        private int _driveCallCount;
 
         public void Init(Component p1WebController, Camera p2Camera, Transform p2InputTransform, GameObject p2Spider, MelonLogger.Instance logger, Transform p1InputTransform = null)
         {
@@ -2580,20 +2480,6 @@ namespace AWJSplitScreen
                 _grappleLine.material = lineMat;
             }
             _grappleLine.enabled = false;
-
-            // Shoot preview line — visible while holding the shoot button, mimics P1's IndicateWeb animation
-            var shootLineGo = new GameObject("P2_ShootLine");
-            shootLineGo.transform.SetParent(p2Spider.transform, false);
-            _shootLine = shootLineGo.AddComponent<LineRenderer>();
-            _shootLine.useWorldSpace = true;
-            _shootLine.positionCount = 2;
-            _shootLine.startWidth = 0.15f;
-            _shootLine.endWidth = 0.05f;   // taper toward tip for a "shooting" look
-            _shootLine.enabled = false;
-
-            // Share the fallback material with the shoot line if web material wasn't found yet
-            if (!_webLineMatCached && _grappleLine.material != null)
-                _shootLine.material = new Material(_grappleLine.material);
         }
 
         private void TryCopyWebLineMaterial()
@@ -2608,7 +2494,6 @@ namespace AWJSplitScreen
                 {
                     var lr = allRenderers[i];
                     if (lr == _grappleLine) continue;
-                    if (lr == _shootLine) continue;
                     // Check if parent/self has a component with "WebThread" in its type name
                     var comps = lr.GetComponents<Component>();
                     bool isWebThread = false;
@@ -2637,19 +2522,6 @@ namespace AWJSplitScreen
                     _grappleLine.textureMode = bestLR.textureMode;
                     _grappleLine.numCapVertices = bestLR.numCapVertices;
                     _grappleLine.numCornerVertices = bestLR.numCornerVertices;
-
-                    // Apply the same material/settings to the shoot preview line
-                    if (_shootLine != null)
-                    {
-                        _shootLine.material = new Material(bestLR.material);
-                        _shootLine.startWidth = bestLR.startWidth;
-                        _shootLine.endWidth = bestLR.endWidth * 0.35f; // taper to tip
-                        _shootLine.widthMultiplier = bestLR.widthMultiplier;
-                        _shootLine.colorGradient = bestLR.colorGradient;
-                        _shootLine.textureMode = bestLR.textureMode;
-                        _shootLine.numCapVertices = bestLR.numCapVertices;
-                        _shootLine.numCornerVertices = bestLR.numCornerVertices;
-                    }
 
                     _webLineMatCached = true;
                     if (_logger != null)
@@ -3104,28 +2976,10 @@ namespace AWJSplitScreen
 
             try
             {
-                if (false && _logger != null && SplitScreenMod.P2Camera != null)
-                {
-                    var ct = SplitScreenMod.P2Camera.transform;
-                    _logger.Msg("[P2WebManager] InvokeAsP2 begin | P2CamPos=" + ct.position + " fwd=" + ct.forward
-                        + " | wcMainCam=" + (UnityEngine.Camera.main != null ? UnityEngine.Camera.main.name : "null"));
-                }
                 if (refreshTarget && _mCheckForWebTarget != null)
                 {
                     try { _mCheckForWebTarget.Invoke(_p1WebController, new object[] { 1f }); }
                     catch (Exception ex) { if (_logger != null) _logger.Warning("[P2WebManager] CheckForWebTarget(P2) failed: " + ex.Message); }
-
-                    // Log what the engine selected as the web target after CheckForWebTarget.
-                    if (false && _logger != null)
-                    {
-                        try
-                        {
-                            var wto = _fWebTargetObject != null ? _fWebTargetObject.GetValue(_p1WebController) as GameObject : null;
-                            var wt  = _fWebTarget != null ? _fWebTarget.GetValue(_p1WebController) as Transform : null;
-                            _logger.Msg("[P2WebManager] After CheckForWebTarget(P2): webTargetObject=" + (wto != null ? wto.name : "null")
-                                + " webTarget.pos=" + (wt != null ? wt.position.ToString() : "null"));
-                        } catch { }
-                    }
                 }
 
                 if (invoke != null)
@@ -3348,8 +3202,6 @@ namespace AWJSplitScreen
 
         public void DriveInput()
         {
-            _driveCallCount++;
-
             if (!_inited || _p1WebController == null)
             {
                 if (Time.unscaledTime >= _nextDebugLog)
@@ -3396,19 +3248,6 @@ namespace AWJSplitScreen
                 bool bDown = bHeld && !_bPrev;
                 bool bUp   = !bHeld && _bPrev;
                 _bPrev = bHeld;
-
-                // --- Periodic debug dump ---
-                if (false && Time.unscaledTime >= _nextDebugLog)
-                {
-                    _nextDebugLog = Time.unscaledTime + 2f;
-                    if (_logger != null)
-                        _logger.Msg("[P2WebManager] TICK #" + _driveCallCount +
-                            " | RT=" + rtHeld + " LT=" + ltHeld + " RB=" + rbHeld + " LB=" + lbHeld + " B=" + bHeld +
-                            " | webActive=" + (_p2Capsule != null ? _p2Capsule.webActive.ToString() : "?") +
-                            " | sj=" + (_p2Capsule != null && _p2Capsule.springJoint != null) +
-                            " | cam=" + (_p2Camera != null) +
-                            " | dot=" + (_p2TargetDot != null ? _p2TargetDot.activeSelf.ToString() : "NULL"));
-                }
 
                 // --- Refresh P2's web target each frame so the dot snaps to webbable surfaces
                 // exactly like P1's reticle. This swaps state for one CheckForWebTarget call.
@@ -3461,9 +3300,6 @@ namespace AWJSplitScreen
                     InvokeAsP2(() => _mDeleteWebReleased.Invoke(_p1WebController, null), refreshTarget: false);
                 }
 
-                // Update shoot preview line (visible while holding shoot, like P1's IndicateWeb)
-                UpdateShootLine(rtHeld);
-
                 // Update grapple line visual (driven by P2's capsule state)
                 UpdateGrappleLine();
             }
@@ -3474,44 +3310,6 @@ namespace AWJSplitScreen
                 if (_logger != null)
                     _logger.Warning("[P2WebManager] DriveInput error: " + ex);
             }
-        }
-
-        private void UpdateShootLine(bool shootHeld)
-        {
-            if (_shootLine == null) return;
-
-            // Lazy material copy — web materials may not exist at init time
-            if (!_webLineMatCached)
-                TryCopyWebLineMaterial();
-
-            if (!shootHeld || _p2Camera == null)
-            {
-                _shootLine.enabled = false;
-                return;
-            }
-
-            Vector3 startPos;
-            if (_p2WebStartPoint != null)
-                startPos = _p2WebStartPoint.position;
-            else if (_p2InputTransform != null)
-                startPos = _p2InputTransform.position + Vector3.up * _webStartHeightOffset;
-            else if (_p2Rigidbody != null)
-                startPos = _p2Rigidbody.position;
-            else
-                startPos = _p2Camera.transform.position;
-
-            // Ray from camera center — same origin as target dot, so line always ends exactly on the dot
-            var ray = new Ray(_p2Camera.transform.position, _p2Camera.transform.forward);
-            RaycastHit hit;
-            Vector3 endPos;
-            if (Physics.Raycast(ray, out hit, _grappleMaxDist))
-                endPos = hit.point;
-            else
-                endPos = _p2Camera.transform.position + _p2Camera.transform.forward * _grappleMaxDist;
-
-            _shootLine.SetPosition(0, startPos);
-            _shootLine.SetPosition(1, endPos);
-            _shootLine.enabled = true;
         }
 
         private void TickP2DeleteHold(bool bHeld, bool bDown, bool bUp)
@@ -3718,11 +3516,6 @@ namespace AWJSplitScreen
             {
                 UnityEngine.Object.Destroy(_grappleLine.gameObject);
                 _grappleLine = null;
-            }
-            if (_shootLine != null)
-            {
-                UnityEngine.Object.Destroy(_shootLine.gameObject);
-                _shootLine = null;
             }
             _p1WebController = null;
             _p2Camera = null;
@@ -4168,11 +3961,7 @@ namespace AWJSplitScreen
             // The old "P2 stick is active, so suppress P1" heuristic caused false positives
             // when P1 was using mouse/keyboard while P2 moved the right stick.
             if (InputCompat.IsCallbackContextFromP2Gamepad(__0, SplitScreenMod.P2GamepadIndex))
-            {
-                if (SplitScreenMod.DebugCameraInput)
-                    MelonLogger.Msg("[CameraMouseLook] Blocked P2 gamepad OnLook.");
                 return false;
-            }
 
             return true;
         }
@@ -4186,11 +3975,7 @@ namespace AWJSplitScreen
             if (!SplitScreenMod.P2UseGamepad) return true;
 
             if (InputCompat.IsCallbackContextFromP2Gamepad(__0, SplitScreenMod.P2GamepadIndex))
-            {
-                if (SplitScreenMod.DebugCameraInput)
-                    MelonLogger.Msg("[CameraZoom] Blocked P2 gamepad OnZoom.");
                 return false;
-            }
 
             return true;
         }
@@ -4563,9 +4348,6 @@ namespace AWJSplitScreen
         private static FieldInfo _fStateForJump;
         private static object _jumpingStateForJump;
         private static object _walkingStateForJump;
-        internal static bool _p1JumpBypassLogged;
-        internal static bool _p1JumpPollLogged;
-
         private static bool IsAlreadyJumping(object instance)
         {
             if (!_stateFieldCached)
@@ -4646,14 +4428,7 @@ namespace AWJSplitScreen
                     SplitScreenMod.P1JumpPressed = false;
                     if (!IsAlreadyJumping(__instance) &&
                         SplitScreenMod.BodyMove_JumpInputField != null)
-                    {
                         try { SplitScreenMod.BodyMove_JumpInputField.SetValue(__instance, true); } catch { }
-                        if (!_p1JumpBypassLogged)
-                        {
-                            _p1JumpBypassLogged = true;
-                            try { MelonLoader.MelonLogger.Msg("[P1JumpBypass] jumpInput=true set on P1 BodyMovement (first time)."); } catch { }
-                        }
-                    }
                 }
             }
         }
@@ -4804,22 +4579,13 @@ namespace AWJSplitScreen
             return SplitScreenMod.P2ShootHeld || SplitScreenMod.InP2WebContext;
         }
 
-        private static float _nextFilterLog;
-
         public static bool CallbackContextFilter_Prefix(object __instance, ref UnityEngine.InputSystem.InputAction.CallbackContext __0)
         {
             if (!SplitScreenMod.FilterP1FromP2Gamepad) return true;
             if (!SplitScreenMod.P2UseGamepad) return true;
 
             if (InputCompat.IsCallbackContextFromP2Gamepad(__0, SplitScreenMod.P2GamepadIndex))
-            {
-                if (Time.unscaledTime >= _nextFilterLog)
-                {
-                    _nextFilterLog = Time.unscaledTime + 2f;
-                    MelonLogger.Msg("[WebControllerPatches] BLOCKED P2 callback on " + __instance.GetType().Name);
-                }
                 return false;
-            }
 
             return true;
         }
@@ -4871,49 +4637,15 @@ namespace AWJSplitScreen
 
     internal static class CameraControllerPatches
     {
-        private static float _nextDebugLogAt;
-        private static int _callbackHits;
-        private static int _callbackBlockedP2;
-        private static int _pollingBlockedP2;
-        private static int _nonControllerPathSuspicions;
-
         public static bool CallbackContextFilter_Prefix(ref UnityEngine.InputSystem.InputAction.CallbackContext __0)
         {
             if (!SplitScreenMod.FilterP1FromP2Gamepad) return true;
             if (!SplitScreenMod.P2UseGamepad) return true;
 
-            bool sawAnyCallbackArg = true;
-            _callbackHits++;
-
             if (InputCompat.IsCallbackContextFromP2Gamepad(__0, SplitScreenMod.P2GamepadIndex))
-            {
-                _callbackBlockedP2++;
                 return false;
-            }
-
-            MaybeDebugLog("callback-path pass", sawAnyCallbackArg);
 
             return true;
-        }
-
-        // Polling look guard intentionally disabled due to crash risk in unknown camera lifecycle methods.
-
-        private static void MaybeDebugLog(string reason, bool sawAnyCallbackArg)
-        {
-            if (!SplitScreenMod.DebugCameraInput) return;
-
-            float now = Time.unscaledTime;
-            if (now < _nextDebugLogAt) return;
-            _nextDebugLogAt = now + 1.0f;
-
-            var rs = InputCompat.GetP2RightStick(SplitScreenMod.P2GamepadIndex, 0f);
-            MelonLogger.Msg("[CameraDebug] " + reason +
-                " | rs=(" + rs.x.ToString("F3") + "," + rs.y.ToString("F3") + ")" +
-                " | callbackArgs=" + sawAnyCallbackArg +
-                " | callbackHits=" + _callbackHits +
-                " | callbackBlockedP2=" + _callbackBlockedP2 +
-                " | pollingBlockedP2=" + _pollingBlockedP2 +
-                " | nonControllerPathSuspicions=" + _nonControllerPathSuspicions);
         }
 
         public static bool InputTransform_Prefix(ref Transform __result)
@@ -5677,27 +5409,12 @@ namespace AWJSplitScreen
         // Needed because the shared jumpInputAction (used by both P1 and P2 BodyMovement
         // instances) gets stuck in the Performed phase while P2's South is actuated, so
         // P1's gamepad-South press doesn't fire a fresh `performed` callback.
-        private static bool _p1PollEnteredLogged;
-        private static bool _p1PollKbLogged;
         public static bool IsP1JumpPressedNow(int p2Index)
         {
-            if (!_p1PollEnteredLogged)
-            {
-                _p1PollEnteredLogged = true;
-                try { MelonLoader.MelonLogger.Msg("[P1JumpBypass] IsP1JumpPressedNow CALLED (first time). _usingNewInput=" + _usingNewInput + " _gamepadType=" + (_gamepadType != null) + " _gamepadAllProp=" + (_gamepadAllProp != null) + " _buttonSouthProp=" + (_buttonSouthProp != null) + " _buttonWasPressedThisFrame=" + (_buttonWasPressedThisFrame != null)); } catch { }
-            }
-
             // Keyboard Space — vanilla path also covers this, but include for completeness
             // (it can never be blocked by gamepad phase issues anyway).
             if (Down("spaceKey", KeyCode.Space))
-            {
-                if (!_p1PollKbLogged)
-                {
-                    _p1PollKbLogged = true;
-                    try { MelonLoader.MelonLogger.Msg("[P1JumpBypass] Space key detected (first time)."); } catch { }
-                }
                 return true;
-            }
 
             // Iterate gamepads 0..MAX via the proven GetGamepadAtIndex path
             // (don't reinvent ReadOnlyArray reflection — use the cached one).
