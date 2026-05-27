@@ -167,7 +167,7 @@ namespace AWJSplitScreen
             SceneManager.sceneLoaded += (_, __) => MelonCoroutines.Start(DeferredSetup());
 
             LoggerInstance.Msg("AWJ Split Screen + P2 Inject v0.2.2 loaded.");
-            LoggerInstance.Msg("F9 split, F10 orientation | P2 Move: IJKL or Gamepad LStick | P2 Sprint: LStick click (toggle) | P2 Look: N/M or RStickX | P2 Zoom: RStick press | P2 Jump: A | P2 Interact: H/X | P2 Web: U/LT shoot, P/RT attach, O/B delete, RightCtrl/RB release.");
+            LoggerInstance.Msg("F9 split, F10 orientation | P2 Move: IJKL or Gamepad LStick | P2 Sprint: LStick click (toggle) | P2 Look: N/M or RStickX | P2 Zoom: RStick press | P2 Jump: A | P2 Interact: H/X | P2 Web: RT shoot/release, LT quick build, LB fixed anchor, RB moving anchor, B delete/cancel.");
             LoggerInstance.Msg("Tip: If both controllers still move P1, ensure FilterP1FromP2Gamepad=true and P2_GamepadIndex is the second pad (usually 1).");
         }
 
@@ -2274,8 +2274,14 @@ namespace AWJSplitScreen
         // own target dot so it looks identical and scales with distance the
         // same way P1's does.
         private FieldInfo _fWebTargetGfx;
+        private FieldInfo _fWebAnchorGfx;
         private FieldInfo _fWebTargetSize;
         private FieldInfo _fWebDistance;
+        private FieldInfo _fWebTargetDefaultMaterial;
+        private FieldInfo _fWebAnchorFixedAnchorMaterial;
+        private FieldInfo _fWebTargetFixedAnchorMaterial;
+        private FieldInfo _fWebAnchorMovingAnchorMaterial;
+        private FieldInfo _fWebTargetMovingAnchorMaterial;
         private AnimationCurve _webTargetSizeCurve;
         private float _webDistanceVal = 50f;
         // CameraController.mainCamera private field — game systems often access this
@@ -2300,8 +2306,9 @@ namespace AWJSplitScreen
         private Transform _p2InputTransform;
         private Rigidbody _p2Rigidbody;
 
-        // Simple sphere target dot
+        // P2 reticle/anchor indicators cloned from P1's web gfx.
         private GameObject _p2TargetDot;
+        private GameObject _p2AnchorDot;
         private float _p2DotScale = 0.5f;
         private float _p2NormalOffset = 0.05f;
 
@@ -2370,6 +2377,7 @@ namespace AWJSplitScreen
                 _grappleMaxDist = _p1MaxDistance > 0f ? _p1MaxDistance : _grappleMaxDist;
 
                 try { CreateTargetDot(); } catch (Exception ex) { logger.Warning("[P2WebManager] CreateTargetDot failed: " + ex); }
+                try { CreateAnchorDot(); } catch (Exception ex) { logger.Warning("[P2WebManager] CreateAnchorDot failed: " + ex); }
                 try { CreateGrappleLine(p2Spider); } catch (Exception ex) { logger.Warning("[P2WebManager] CreateGrappleLine failed: " + ex); }
 
                 // Set up P2-side WebController state (bodyMovement / Root / per-player webTarget+webAnchor / playerWebJoint).
@@ -2457,6 +2465,64 @@ namespace AWJSplitScreen
 
             _p2TargetDot.SetActive(false);
             _logger.Msg("[P2WebManager] Created target dot sphere (fallback).");
+        }
+
+        private void CreateAnchorDot()
+        {
+            GameObject cloneSrc = null;
+            try
+            {
+                if (_fWebAnchorGfx != null && _p1WebController != null)
+                {
+                    var srcTr = _fWebAnchorGfx.GetValue(_p1WebController) as Transform;
+                    if (srcTr != null) cloneSrc = srcTr.gameObject;
+                }
+            }
+            catch { }
+
+            if (cloneSrc != null)
+            {
+                _p2AnchorDot = UnityEngine.Object.Instantiate(cloneSrc);
+                _p2AnchorDot.name = "P2_WebAnchorDot";
+                _p2AnchorDot.transform.SetParent(null, false);
+                foreach (var c in _p2AnchorDot.GetComponentsInChildren<Collider>(true))
+                {
+                    try { UnityEngine.Object.Destroy(c); } catch { }
+                }
+                _p2AnchorDot.transform.localScale = Vector3.one * _p2DotScale;
+                _p2AnchorDot.SetActive(false);
+                _logger.Msg("[P2WebManager] Cloned anchor dot from P1 webAnchorGfx.");
+                return;
+            }
+
+            _p2AnchorDot = GameObject.CreatePrimitive(PrimitiveType.Sphere);
+            _p2AnchorDot.name = "P2_WebAnchorDot";
+            _p2AnchorDot.transform.localScale = Vector3.one * _p2DotScale;
+
+            var col = _p2AnchorDot.GetComponent<Collider>();
+            if (col != null) UnityEngine.Object.Destroy(col);
+
+            var rend = _p2AnchorDot.GetComponent<Renderer>();
+            if (rend != null)
+            {
+                var shader = Shader.Find("Unlit/Color");
+                if (shader == null) shader = Shader.Find("Sprites/Default");
+                if (shader == null) shader = Shader.Find("Standard");
+                if (shader == null) shader = rend.material.shader;
+                var mat = new Material(shader);
+                mat.color = new Color(1f, 1f, 1f, 1f);
+                try { mat.SetColor("_Color", new Color(1f, 1f, 1f, 1f)); } catch { }
+                try { mat.SetColor("_EmissionColor", new Color(1f, 1f, 1f, 1f)); } catch { }
+                try { mat.SetInt("_ZTest", (int)UnityEngine.Rendering.CompareFunction.Always); } catch { }
+                try { mat.SetInt("_ZWrite", 0); } catch { }
+                mat.renderQueue = 5000;
+                rend.material = mat;
+                rend.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+                rend.receiveShadows = false;
+            }
+
+            _p2AnchorDot.SetActive(false);
+            _logger.Msg("[P2WebManager] Created anchor dot sphere (fallback).");
         }
 
         private bool _webLineMatCached;
@@ -2763,8 +2829,14 @@ namespace AWJSplitScreen
                 _fWebTargetPrefab = TryGetField("webTargetPrefab");
                 _fWebAnchorPrefab = TryGetField("webAnchorPrefab");
                 _fWebTargetGfx = TryGetField("webTargetGfx");
+                _fWebAnchorGfx = TryGetField("webAnchorGfx");
                 _fWebTargetSize = TryGetField("webTargetSize");
                 _fWebDistance = TryGetField("webDistance");
+                _fWebTargetDefaultMaterial = TryGetField("webTargetDefaultMaterial");
+                _fWebAnchorFixedAnchorMaterial = TryGetField("webAnchorFixedAnchorMaterial");
+                _fWebTargetFixedAnchorMaterial = TryGetField("webTargetFixedAnchorMaterial");
+                _fWebAnchorMovingAnchorMaterial = TryGetField("webAnchorMovingAnchorMaterial");
+                _fWebTargetMovingAnchorMaterial = TryGetField("webTargetMovingAnchorMaterial");
                 try
                 {
                     if (_fWebTargetSize != null) _webTargetSizeCurve = _fWebTargetSize.GetValue(_p1WebController) as AnimationCurve;
@@ -2930,8 +3002,12 @@ namespace AWJSplitScreen
             // P1's gfx visibility here and restore it in the finally block.
             GameObject p1GfxGo = null;
             bool p1GfxActive = false;
+            Renderer p1GfxRenderer = null;
+            Material p1GfxMaterial = null;
             GameObject p1AnchorGfxGo = null;
             bool p1AnchorGfxActive = false;
+            Renderer p1AnchorGfxRenderer = null;
+            Material p1AnchorGfxMaterial = null;
             try
             {
                 if (_fWebTargetGfx != null)
@@ -2941,16 +3017,19 @@ namespace AWJSplitScreen
                     {
                         p1GfxGo = gfxTr.gameObject;
                         p1GfxActive = p1GfxGo.activeSelf;
+                        p1GfxRenderer = gfxTr.GetComponentInChildren<Renderer>(true);
+                        if (p1GfxRenderer != null) p1GfxMaterial = p1GfxRenderer.sharedMaterial;
                     }
                 }
-                var anchorGfxField = _wcType?.GetField("webAnchorGfx", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
-                if (anchorGfxField != null)
+                if (_fWebAnchorGfx != null)
                 {
-                    var anchTr = anchorGfxField.GetValue(_p1WebController) as Transform;
+                    var anchTr = _fWebAnchorGfx.GetValue(_p1WebController) as Transform;
                     if (anchTr != null)
                     {
                         p1AnchorGfxGo = anchTr.gameObject;
                         p1AnchorGfxActive = p1AnchorGfxGo.activeSelf;
+                        p1AnchorGfxRenderer = anchTr.GetComponentInChildren<Renderer>(true);
+                        if (p1AnchorGfxRenderer != null) p1AnchorGfxMaterial = p1AnchorGfxRenderer.sharedMaterial;
                     }
                 }
             }
@@ -3011,6 +3090,10 @@ namespace AWJSplitScreen
                         p1GfxGo.SetActive(p1GfxActive);
                     if (p1AnchorGfxGo != null && p1AnchorGfxGo.activeSelf != p1AnchorGfxActive)
                         p1AnchorGfxGo.SetActive(p1AnchorGfxActive);
+                    if (p1GfxRenderer != null && p1GfxRenderer.sharedMaterial != p1GfxMaterial)
+                        p1GfxRenderer.sharedMaterial = p1GfxMaterial;
+                    if (p1AnchorGfxRenderer != null && p1AnchorGfxRenderer.sharedMaterial != p1AnchorGfxMaterial)
+                        p1AnchorGfxRenderer.sharedMaterial = p1AnchorGfxMaterial;
                 }
                 catch { }
                 SplitScreenMod.InP2WebContext = false;
@@ -3267,6 +3350,7 @@ namespace AWJSplitScreen
 
                 // --- Target dot (always visible, like P1's) ---
                 UpdateTargetDot(true);
+                UpdateAnchorDot(true);
 
                 // --- Hold-to-delete-all-webs simulation (P2's capsule timer can't tick
                 // between input events because P2 state is only loaded transiently;
@@ -3349,6 +3433,12 @@ namespace AWJSplitScreen
         {
             if (_p2TargetDot == null || _p2Camera == null) return;
 
+            if (!show)
+            {
+                _p2TargetDot.SetActive(false);
+                return;
+            }
+
             bool placed = false;
 
             // Prefer the engine-resolved web target from CheckForWebTarget (refreshed
@@ -3391,7 +3481,34 @@ namespace AWJSplitScreen
             }
 
             if (placed)
-                ApplyTargetDotScale();
+            {
+                ApplyIndicatorScale(_p2TargetDot);
+                ApplyIndicatorMaterial(_p2TargetDot, GetP2TargetIndicatorMaterial());
+            }
+        }
+
+        private void UpdateAnchorDot(bool show)
+        {
+            if (_p2AnchorDot == null)
+                return;
+
+            if (!show || _p2Capsule == null || !_p2Capsule.webAnchorActive)
+            {
+                _p2AnchorDot.SetActive(false);
+                return;
+            }
+
+            var anchorTr = _p2Capsule.webAnchor as Transform ?? _p2WebAnchorTr;
+            if (anchorTr == null)
+            {
+                _p2AnchorDot.SetActive(false);
+                return;
+            }
+
+            _p2AnchorDot.SetActive(true);
+            _p2AnchorDot.transform.position = anchorTr.position;
+            ApplyIndicatorScale(_p2AnchorDot);
+            ApplyIndicatorMaterial(_p2AnchorDot, GetP2AnchorIndicatorMaterial());
         }
 
         // Mirror P1's distance-based dot scaling so the on-screen reticle size
@@ -3399,9 +3516,9 @@ namespace AWJSplitScreen
         //   webTargetGfx.localScale = Vector3.one * webTargetSize.Evaluate(
         //       Vector3.Distance(webTargetGfx.position, webStartPoint.position) / webDistance);
         // (see ilspy_WebController/_Scripts.Singletons/WebController.cs:505)
-        private void ApplyTargetDotScale()
+        private void ApplyIndicatorScale(GameObject indicator)
         {
-            if (_p2TargetDot == null) return;
+            if (indicator == null) return;
 
             // Use P2's own web start point so distance reflects P2's view.
             // Fall back to the camera position if no start point has been
@@ -3412,7 +3529,7 @@ namespace AWJSplitScreen
             else if (_p2Camera != null) start = _p2Camera.transform.position;
             else return;
 
-            float dist = Vector3.Distance(_p2TargetDot.transform.position, start);
+            float dist = Vector3.Distance(indicator.transform.position, start);
             float t = (_webDistanceVal > 0f) ? Mathf.Clamp01(dist / _webDistanceVal) : 0f;
 
             float s;
@@ -3426,7 +3543,49 @@ namespace AWJSplitScreen
                 s = Mathf.Lerp(0.15f, 1.0f, t);
             }
             if (s <= 0.0001f) s = 0.0001f;
-            _p2TargetDot.transform.localScale = Vector3.one * s;
+            indicator.transform.localScale = Vector3.one * s;
+        }
+
+        private Material GetP2TargetIndicatorMaterial()
+        {
+            if (_p2Capsule != null && _p2Capsule.webAnchorActive)
+            {
+                if (_p2Capsule.webBuildingMode == 1)
+                    return GetFieldRaw(_fWebTargetFixedAnchorMaterial) as Material;
+
+                return GetFieldRaw(_fWebTargetMovingAnchorMaterial) as Material;
+            }
+
+            return GetFieldRaw(_fWebTargetDefaultMaterial) as Material;
+        }
+
+        private Material GetP2AnchorIndicatorMaterial()
+        {
+            if (_p2Capsule != null && _p2Capsule.webBuildingMode == 1)
+                return GetFieldRaw(_fWebAnchorFixedAnchorMaterial) as Material;
+
+            return GetFieldRaw(_fWebAnchorMovingAnchorMaterial) as Material;
+        }
+
+        private static void ApplyIndicatorMaterial(GameObject indicator, Material material)
+        {
+            if (indicator == null || material == null)
+                return;
+
+            try
+            {
+                var renderers = indicator.GetComponentsInChildren<Renderer>(true);
+                if (renderers == null)
+                    return;
+
+                for (int i = 0; i < renderers.Length; i++)
+                {
+                    var renderer = renderers[i];
+                    if (renderer != null && renderer.sharedMaterial != material)
+                        renderer.sharedMaterial = material;
+                }
+            }
+            catch { }
         }
 
         private void UpdateGrappleLine()
@@ -3520,6 +3679,11 @@ namespace AWJSplitScreen
             {
                 UnityEngine.Object.Destroy(_p2TargetDot);
                 _p2TargetDot = null;
+            }
+            if (_p2AnchorDot != null)
+            {
+                UnityEngine.Object.Destroy(_p2AnchorDot);
+                _p2AnchorDot = null;
             }
             if (_grappleLine != null)
             {
@@ -5539,22 +5703,22 @@ namespace AWJSplitScreen
             return kb || (lt >= triggerThreshold);
         }
 
-        // RB (right shoulder) → fixed anchor (held)
+        // LB (left shoulder) → fixed anchor (held)
         public static bool IsP2FixedAnchorHeldNow(bool useGamepad, int index, string kbProp, KeyCode kbFallback)
         {
             bool kb = !string.IsNullOrEmpty(kbProp) && Held(kbProp, kbFallback);
             if (!useGamepad) return kb || (kbFallback != KeyCode.None && SafeKey(kbFallback));
             var gp = GetP2Gamepad(index);
-            return kb || ReadButtonHeld(gp, _rightShoulderProp);
+            return kb || ReadButtonHeld(gp, _leftShoulderProp);
         }
 
-        // LB (left shoulder) → moving anchor (held)
+        // RB (right shoulder) → moving anchor (held)
         public static bool IsP2MovingAnchorHeldNow(bool useGamepad, int index, string kbProp, KeyCode kbFallback)
         {
             bool kb = !string.IsNullOrEmpty(kbProp) && Held(kbProp, kbFallback);
             if (!useGamepad) return kb || (kbFallback != KeyCode.None && SafeKey(kbFallback));
             var gp = GetP2Gamepad(index);
-            return kb || ReadButtonHeld(gp, _leftShoulderProp);
+            return kb || ReadButtonHeld(gp, _rightShoulderProp);
         }
 
         // B (buttonEast) → delete (held — P2WebManager tracks press/release edges itself)

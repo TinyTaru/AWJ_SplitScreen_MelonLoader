@@ -8,13 +8,13 @@ F10 - Flip between horizontal and vertical.
 - Move: Left Stick
 - Sprint: Left Stick Click (toggle)
 - Look: Right Stick
-- Shoot: Left Trigger
-- Attach/Grapple: Right Trigger
-- Delete: B
-- Release: RB
+- Shoot / release: Right Trigger
+- Quick build: Left Trigger
+- Fixed anchor: Left Bumper
+- Moving anchor: Right Bumper
+- Delete / cancel: B
 
-Keyboard fallback:
-- Move IJKL, Look N/M, Shoot U, Attach P, Delete O, Release RightCtrl.
+Advanced web inputs currently use the controller-only P2 path.
 
 Preferences in:
 `<GameFolder>\UserData\MelonPreferences.cfg`
