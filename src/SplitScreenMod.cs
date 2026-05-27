@@ -27,6 +27,7 @@ namespace AWJSplitScreen
         internal static bool P2JumpPressed;            // set in OnUpdate, consumed in FixedUpdate
         internal static bool P1JumpPressed;            // bypass for shared jumpInputAction phase blocking when P2 holds South
         internal static bool InP2WebContext;           // one-shot actions
+        internal static bool P2WebActive;              // last published P2 grapple/web state for movement patches
         internal static Transform P2InputTransform;
         internal static Camera P2Camera;
         internal static Component P1BodyMovementInstance;
@@ -2336,6 +2337,7 @@ namespace AWJSplitScreen
         public void Init(Component p1WebController, Camera p2Camera, Transform p2InputTransform, GameObject p2Spider, MelonLogger.Instance logger, Transform p1InputTransform = null)
         {
             _logger = logger;
+            SplitScreenMod.P2WebActive = false;
             if (_logger != null) _logger.Msg("[P2WebManager] Init begin");
 
             try
@@ -2910,6 +2912,11 @@ namespace AWJSplitScreen
             }
         }
 
+        private void PublishP2WebState()
+        {
+            SplitScreenMod.P2WebActive = _p2Capsule != null && _p2Capsule.webActive;
+        }
+
         private void InvokeAsP2(Action invoke, bool setShootHeld = false, bool refreshTarget = true)
         {
             if (_p2Capsule == null || _p1WebController == null) return;
@@ -2992,6 +2999,7 @@ namespace AWJSplitScreen
             {
                 // Capture P2's mutated state for next time.
                 SaveLive(_p2Capsule);
+                PublishP2WebState();
                 // Restore P1.
                 LoadLive(savedP1);
                 // Restore the shared web target/anchor gfx visibility to what
@@ -3186,6 +3194,7 @@ namespace AWJSplitScreen
                 _p2Capsule.oldWebTargetObject = null;
                 _p2Capsule.oldWebTargetObject1 = null;
                 _p2Capsule.webAnchorObject = null;
+                PublishP2WebState();
 
                 if (_logger != null)
                     _logger.Msg("[P2WebManager] P2 web state ready. bm=" + (_p2BodyMovement != null)
@@ -3521,6 +3530,7 @@ namespace AWJSplitScreen
             _p2Camera = null;
             _p2InputTransform = null;
             _p2Rigidbody = null;
+            SplitScreenMod.P2WebActive = false;
             _inited = false;
         }
 
@@ -4100,6 +4110,7 @@ namespace AWJSplitScreen
         private static FieldInfo _fPjLandingRotSmooth, _fPjJumpingRotSmooth;
         private static FieldInfo _fPjLandingOffset, _fPjLandingRadius;
         private static FieldInfo _fPjAerialThresh, _fPjAerialSpeedLR, _fPjAerialSpeedFB;
+        private static FieldInfo _fPjBounceMinVelocity;
         private static FieldInfo _fPjWhatIsGround;
         private static FieldInfo _fPjMovementTimer, _fPjMovementStopTime;
         private static MethodInfo _mPjPerformLanding;
@@ -4123,6 +4134,7 @@ namespace AWJSplitScreen
             _fPjAerialThresh   = t.GetField("aerialAccelerationThreshold",  BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
             _fPjAerialSpeedLR  = t.GetField("aerialControlSpeedLeftRight",  BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
             _fPjAerialSpeedFB  = t.GetField("aerialControlSpeedForwardBackwards", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+            _fPjBounceMinVelocity = t.GetField("bounceMinimumVelocity",     BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
             _fPjWhatIsGround   = t.GetField("whatIsGround",                 BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public)
                                ?? t.GetField("WhatIsGround",                BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
             _fPjMovementTimer     = t.GetField("movementTimer",     BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
@@ -4167,6 +4179,8 @@ namespace AWJSplitScreen
                     hitGround = Physics.SphereCast(new Ray(mb.transform.position, vel.normalized),
                         0.5f, out hitInfo, 5f,
                         PjGet<LayerMask>(_fPjWhatIsGround, __instance, Physics.DefaultRaycastLayers));
+                float bounceMinimumVelocity = Mathf.Max(0f, PjGet<float>(_fPjBounceMinVelocity, __instance, 10f));
+                bool p2WebActive = SplitScreenMod.P2WebActive;
 
                 // --- Air control: build a flat yaw-only reference (matches CameraController.InputTransform) ---
                 // Project camera forward onto horizontal plane to strip pitch — camera height won't affect threshold
@@ -4205,7 +4219,13 @@ namespace AWJSplitScreen
                     vel = rb.linearVelocity; // refresh after air control
                 }
 
+                // Mirror the walking path: the spider root orientation is driven
+                // explicitly, so grapple torque must not keep rotating the body
+                // between fixed steps and show up as camera-visible shake.
+                rb.angularVelocity = Vector3.zero;
+
                 // --- Rotation (mirror original math) ---
+                float velMagnitude = vel.magnitude;
                 Vector3 normalized = vel.sqrMagnitude > 0.001f
                     ? Vector3.Cross(Vector3.up, vel.normalized).normalized
                     : mb.transform.right;
@@ -4213,7 +4233,7 @@ namespace AWJSplitScreen
                 Vector3 forward2  = Quaternion.AngleAxis(-pitchAngle, normalized) * vel.normalized;
                 Vector3 upwards   = Vector3.Cross(normalized, -forward2);
 
-                bool landing = jumpTimer <= 0f && hitGround;
+                bool landing = jumpTimer <= 0f && hitGround && (!p2WebActive || velMagnitude < bounceMinimumVelocity);
                 if (landing)
                 {
                     upwards  = hitInfo.normal;
@@ -4222,9 +4242,9 @@ namespace AWJSplitScreen
 
                 if (vel.sqrMagnitude > 0f)
                 {
-                    float smoothness = landing
-                        ? PjGet<float>(_fPjLandingRotSmooth,  __instance, 2f)
-                        : PjGet<float>(_fPjJumpingRotSmooth, __instance, 4f);
+                    float smoothness = PjGet<float>(_fPjJumpingRotSmooth, __instance, 4f);
+                    if (landing || (hitGround && (!p2WebActive || velMagnitude > bounceMinimumVelocity)))
+                        smoothness = PjGet<float>(_fPjLandingRotSmooth, __instance, 2f);
                     Quaternion targetRot = Quaternion.LookRotation(forward2, upwards);
                     Quaternion lastRot   = PjGet<Quaternion>(_fPjLastRotation, __instance, mb.transform.rotation);
                     mb.transform.rotation = Quaternion.Slerp(lastRot, targetRot, 1f / (1f + smoothness));
@@ -4232,7 +4252,7 @@ namespace AWJSplitScreen
                 _fPjLastRotation?.SetValue(__instance, mb.transform.rotation);
 
                 // --- Early return while still airborne ---
-                if (jumpTimer > 0f) return false;
+                if (jumpTimer > 0f || (p2WebActive && velMagnitude > bounceMinimumVelocity)) return false;
 
                 // --- Landing trigger (mirror original) ---
                 float lOffset = PjGet<float>(_fPjLandingOffset, __instance, 0f);
