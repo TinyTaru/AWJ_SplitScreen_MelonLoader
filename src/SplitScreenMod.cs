@@ -2275,6 +2275,7 @@ namespace AWJSplitScreen
         // same way P1's does.
         private FieldInfo _fWebTargetGfx;
         private FieldInfo _fWebAnchorGfx;
+        private FieldInfo _fWebIndicationLineRenderer;
         private FieldInfo _fWebTargetSize;
         private FieldInfo _fWebDistance;
         private FieldInfo _fWebTargetDefaultMaterial;
@@ -2309,6 +2310,7 @@ namespace AWJSplitScreen
         // P2 reticle/anchor indicators cloned from P1's web gfx.
         private GameObject _p2TargetDot;
         private GameObject _p2AnchorDot;
+        private LineRenderer _webIndicatorLine;
         private float _p2DotScale = 0.5f;
         private float _p2NormalOffset = 0.05f;
 
@@ -2378,6 +2380,7 @@ namespace AWJSplitScreen
 
                 try { CreateTargetDot(); } catch (Exception ex) { logger.Warning("[P2WebManager] CreateTargetDot failed: " + ex); }
                 try { CreateAnchorDot(); } catch (Exception ex) { logger.Warning("[P2WebManager] CreateAnchorDot failed: " + ex); }
+                try { CreateWebIndicatorLine(p2Spider); } catch (Exception ex) { logger.Warning("[P2WebManager] CreateWebIndicatorLine failed: " + ex); }
                 try { CreateGrappleLine(p2Spider); } catch (Exception ex) { logger.Warning("[P2WebManager] CreateGrappleLine failed: " + ex); }
 
                 // Set up P2-side WebController state (bodyMovement / Root / per-player webTarget+webAnchor / playerWebJoint).
@@ -2527,6 +2530,17 @@ namespace AWJSplitScreen
 
         private bool _webLineMatCached;
 
+        private void CreateWebIndicatorLine(GameObject p2Spider)
+        {
+            var lineGo = new GameObject("P2_WebIndicatorLine");
+            lineGo.transform.SetParent(p2Spider.transform, false);
+            _webIndicatorLine = lineGo.AddComponent<LineRenderer>();
+            _webIndicatorLine.useWorldSpace = true;
+            _webIndicatorLine.positionCount = 2;
+            _webIndicatorLine.enabled = false;
+            CopyP1WebIndicatorLineSettings();
+        }
+
         private void CreateGrappleLine(GameObject p2Spider)
         {
             var lineGo = new GameObject("P2_GrappleLine");
@@ -2548,6 +2562,52 @@ namespace AWJSplitScreen
                 _grappleLine.material = lineMat;
             }
             _grappleLine.enabled = false;
+        }
+
+        private LineRenderer GetP1WebIndicatorLine()
+        {
+            if (_fWebIndicationLineRenderer == null || _p1WebController == null)
+                return null;
+
+            try
+            {
+                return _fWebIndicationLineRenderer.GetValue(_p1WebController) as LineRenderer;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private void CopyP1WebIndicatorLineSettings()
+        {
+            if (_webIndicatorLine == null)
+                return;
+
+            var source = GetP1WebIndicatorLine();
+            if (source == null)
+                return;
+
+            _webIndicatorLine.sharedMaterial = source.sharedMaterial;
+            _webIndicatorLine.startColor = source.startColor;
+            _webIndicatorLine.endColor = source.endColor;
+            _webIndicatorLine.widthMultiplier = source.widthMultiplier;
+            _webIndicatorLine.widthCurve = source.widthCurve;
+            _webIndicatorLine.startWidth = source.startWidth;
+            _webIndicatorLine.endWidth = source.endWidth;
+            _webIndicatorLine.colorGradient = source.colorGradient;
+            _webIndicatorLine.textureMode = source.textureMode;
+            _webIndicatorLine.alignment = source.alignment;
+            _webIndicatorLine.numCapVertices = source.numCapVertices;
+            _webIndicatorLine.numCornerVertices = source.numCornerVertices;
+            _webIndicatorLine.shadowCastingMode = source.shadowCastingMode;
+            _webIndicatorLine.receiveShadows = source.receiveShadows;
+            _webIndicatorLine.generateLightingData = source.generateLightingData;
+            _webIndicatorLine.motionVectorGenerationMode = source.motionVectorGenerationMode;
+            _webIndicatorLine.lightProbeUsage = source.lightProbeUsage;
+            _webIndicatorLine.reflectionProbeUsage = source.reflectionProbeUsage;
+            _webIndicatorLine.sortingLayerID = source.sortingLayerID;
+            _webIndicatorLine.sortingOrder = source.sortingOrder;
         }
 
         private void TryCopyWebLineMaterial()
@@ -2830,6 +2890,7 @@ namespace AWJSplitScreen
                 _fWebAnchorPrefab = TryGetField("webAnchorPrefab");
                 _fWebTargetGfx = TryGetField("webTargetGfx");
                 _fWebAnchorGfx = TryGetField("webAnchorGfx");
+                _fWebIndicationLineRenderer = TryGetField("webIndicationLineRenderer");
                 _fWebTargetSize = TryGetField("webTargetSize");
                 _fWebDistance = TryGetField("webDistance");
                 _fWebTargetDefaultMaterial = TryGetField("webTargetDefaultMaterial");
@@ -3351,6 +3412,7 @@ namespace AWJSplitScreen
                 // --- Target dot (always visible, like P1's) ---
                 UpdateTargetDot(true);
                 UpdateAnchorDot(true);
+                UpdateWebIndicatorLine();
 
                 // --- Hold-to-delete-all-webs simulation (P2's capsule timer can't tick
                 // between input events because P2 state is only loaded transiently;
@@ -3509,6 +3571,43 @@ namespace AWJSplitScreen
             _p2AnchorDot.transform.position = anchorTr.position;
             ApplyIndicatorScale(_p2AnchorDot);
             ApplyIndicatorMaterial(_p2AnchorDot, GetP2AnchorIndicatorMaterial());
+        }
+
+        private void UpdateWebIndicatorLine()
+        {
+            if (_webIndicatorLine == null)
+                return;
+
+            bool show = false;
+            Vector3 anchorPos = default(Vector3);
+            Vector3 targetPos = default(Vector3);
+
+            try
+            {
+                if (_p2Capsule != null && _p2Capsule.webAnchorActive && _p2Capsule.webTargetActive)
+                {
+                    var anchorTr = _p2Capsule.webAnchor as Transform ?? _p2WebAnchorTr;
+                    var targetTr = _p2Capsule.webTarget as Transform ?? _p2WebTargetTr;
+                    if (anchorTr != null && targetTr != null)
+                    {
+                        anchorPos = anchorTr.position;
+                        targetPos = targetTr.position;
+                        show = true;
+                    }
+                }
+            }
+            catch { }
+
+            if (!show)
+            {
+                _webIndicatorLine.enabled = false;
+                return;
+            }
+
+            CopyP1WebIndicatorLineSettings();
+            _webIndicatorLine.enabled = true;
+            _webIndicatorLine.SetPosition(0, anchorPos);
+            _webIndicatorLine.SetPosition(1, targetPos);
         }
 
         // Mirror P1's distance-based dot scaling so the on-screen reticle size
@@ -3689,6 +3788,11 @@ namespace AWJSplitScreen
             {
                 UnityEngine.Object.Destroy(_grappleLine.gameObject);
                 _grappleLine = null;
+            }
+            if (_webIndicatorLine != null)
+            {
+                UnityEngine.Object.Destroy(_webIndicatorLine.gameObject);
+                _webIndicatorLine = null;
             }
             _p1WebController = null;
             _p2Camera = null;
