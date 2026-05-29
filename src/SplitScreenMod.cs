@@ -13,6 +13,7 @@ namespace AWJSplitScreen
 {
     public sealed class SplitScreenMod : MelonMod
     {
+        private static SplitScreenMod _instance;
         internal static bool SkipCallbackContextPatches;
 
         // Shared config/state for patches
@@ -28,6 +29,7 @@ namespace AWJSplitScreen
         internal static bool P1JumpPressed;            // bypass for shared jumpInputAction phase blocking when P2 holds South
         internal static bool InP2WebContext;           // one-shot actions
         internal static bool P2WebActive;              // last published P2 grapple/web state for movement patches
+        internal static bool P2WebTargetActive;        // published P2 target-in-range state for HUD crosshair
         internal static Transform P2InputTransform;
         internal static Camera P2Camera;
         internal static Component P1BodyMovementInstance;
@@ -142,8 +144,26 @@ namespace AWJSplitScreen
         private Component _p2SpiderInteraction;
         private MethodInfo _p2SpiderMobileInteractMethod;
 
+        internal static bool IsSplitScreenActive
+        {
+            get
+            {
+                return _instance != null
+                    && _enabled != null
+                    && _enabled.Value
+                    && _instance._camLeftOrTop != null
+                    && _instance._camRightOrBottom != null;
+            }
+        }
+
+        internal static Camera P1Camera
+        {
+            get { return _instance != null ? _instance._camLeftOrTop : null; }
+        }
+
         public override void OnInitializeMelon()
         {
+            _instance = this;
             _prefs = MelonPreferences.CreateCategory(Cat);
 
             _enabled = _prefs.CreateEntry("Enabled", true, "Enable split-screen");
@@ -383,6 +403,24 @@ namespace AWJSplitScreen
             catch (Exception ex)
             {
                 LoggerInstance.Warning("WebController patch block failed (non-fatal): " + ex);
+            }
+
+            // GameplayUI crosshair patch
+            try
+            {
+                var gameplayUiType = AccessTools.TypeByName("_Scripts.UI.HUD.GameplayUI");
+                if (gameplayUiType != null)
+                {
+                    var update = AccessTools.Method(gameplayUiType, "Update");
+                    if (update != null)
+                        h.Patch(update, postfix: new HarmonyMethod(typeof(GameplayUIPatches), nameof(GameplayUIPatches.Update_Postfix)));
+
+                    LoggerInstance.Msg("Patched GameplayUI.Update for split-screen crosshair placement.");
+                }
+            }
+            catch (Exception ex)
+            {
+                LoggerInstance.Warning("GameplayUI patch block failed (non-fatal): " + ex);
             }
 
             // CameraController InputTransform getter + CallbackContext filter
@@ -2222,6 +2260,8 @@ namespace AWJSplitScreen
             P2ShootHeld = false;
             P2JumpPressed = false;
             P1JumpPressed = false;
+            P2WebActive = false;
+            P2WebTargetActive = false;
             BodyMovementUnderwaterPatches.Reset();
         }
     }
@@ -2347,6 +2387,7 @@ namespace AWJSplitScreen
         {
             _logger = logger;
             SplitScreenMod.P2WebActive = false;
+            SplitScreenMod.P2WebTargetActive = false;
             if (_logger != null) _logger.Msg("[P2WebManager] Init begin");
 
             try
@@ -3048,6 +3089,7 @@ namespace AWJSplitScreen
         private void PublishP2WebState()
         {
             SplitScreenMod.P2WebActive = _p2Capsule != null && _p2Capsule.webActive;
+            SplitScreenMod.P2WebTargetActive = _p2Capsule != null && _p2Capsule.webTargetActive;
         }
 
         private void InvokeAsP2(Action invoke, bool setShootHeld = false, bool refreshTarget = true)
@@ -3799,6 +3841,7 @@ namespace AWJSplitScreen
             _p2InputTransform = null;
             _p2Rigidbody = null;
             SplitScreenMod.P2WebActive = false;
+            SplitScreenMod.P2WebTargetActive = false;
             _inited = false;
         }
 
@@ -4987,6 +5030,267 @@ namespace AWJSplitScreen
 
             __result = Mathf.Max(SplitScreenMod.P2CameraDistance, 0.01f);
             return false;
+        }
+    }
+
+    internal static class GameplayUIPatches
+    {
+        private static FieldInfo _crossHairsField;
+        private static FieldInfo _crossHairsImageField;
+        private static FieldInfo _webTargetActiveColorField;
+        private static FieldInfo _noWebTargetActiveColorField;
+        private static PropertyInfo _uiEnabledProperty;
+        private static PropertyInfo _uiColorProperty;
+
+        private static RectTransform _trackedCrossHairRect;
+        private static Vector2 _originalAnchorMin;
+        private static Vector2 _originalAnchorMax;
+        private static Vector2 _originalPivot;
+        private static Vector2 _originalAnchoredPosition;
+        private static GameObject _p2CrossHairObject;
+        private static RectTransform _p2CrossHairRect;
+        private static Component _p2CrossHairImage;
+        private static GameObject _trackedCrossHairObject;
+
+        public static void Update_Postfix(object __instance)
+        {
+            if (__instance == null)
+                return;
+
+            RectTransform crossHairRect;
+            GameObject crossHairObject;
+            Component crossHairImage;
+            if (!TryGetCrossHairParts(__instance, out crossHairRect, out crossHairObject, out crossHairImage) || crossHairRect == null)
+                return;
+
+            CaptureOriginalLayoutIfNeeded(crossHairRect);
+
+            if (!SplitScreenMod.IsSplitScreenActive)
+            {
+                RestoreOriginalLayout(crossHairRect);
+                DestroyP2CrossHair();
+                return;
+            }
+
+            var p1Camera = SplitScreenMod.P1Camera;
+            var p2Camera = SplitScreenMod.P2Camera;
+            if (p1Camera == null || p2Camera == null)
+                return;
+
+            var parentRect = crossHairRect.parent as RectTransform;
+            if (parentRect == null)
+                return;
+
+            PositionCrossHair(crossHairRect, parentRect, p1Camera.rect);
+
+            EnsureP2CrossHair(crossHairObject, crossHairImage);
+            if (_p2CrossHairRect == null)
+                return;
+
+            PositionCrossHair(_p2CrossHairRect, parentRect, p2Camera.rect);
+            SyncP2CrossHairState(__instance, crossHairObject, crossHairImage);
+        }
+
+        private static bool TryGetCrossHairParts(object gameplayUi, out RectTransform rectTransform, out GameObject crossHairObject, out Component crossHairImage)
+        {
+            rectTransform = null;
+            crossHairObject = null;
+            crossHairImage = null;
+
+            if (_crossHairsField == null)
+                _crossHairsField = gameplayUi.GetType().GetField("crossHairs", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+
+            if (_crossHairsField != null)
+                crossHairObject = _crossHairsField.GetValue(gameplayUi) as GameObject;
+
+            if (crossHairObject != null)
+                rectTransform = crossHairObject.GetComponent<RectTransform>();
+
+            if (_crossHairsImageField == null)
+                _crossHairsImageField = gameplayUi.GetType().GetField("crossHairsImage", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+
+            if (_crossHairsImageField != null)
+            {
+                crossHairImage = _crossHairsImageField.GetValue(gameplayUi) as Component;
+                if (crossHairImage != null)
+                {
+                    if (rectTransform == null)
+                        rectTransform = crossHairImage.transform as RectTransform;
+                }
+            }
+
+            if (crossHairObject != null)
+            {
+                if (crossHairImage == null)
+                    crossHairImage = FindUiImageComponent(crossHairObject);
+            }
+
+            if (crossHairObject == null && rectTransform != null)
+                crossHairObject = rectTransform.gameObject;
+
+            return rectTransform != null && crossHairObject != null;
+        }
+
+        private static void CaptureOriginalLayoutIfNeeded(RectTransform rectTransform)
+        {
+            if (_trackedCrossHairRect == rectTransform)
+                return;
+
+            _trackedCrossHairRect = rectTransform;
+            _originalAnchorMin = rectTransform.anchorMin;
+            _originalAnchorMax = rectTransform.anchorMax;
+            _originalPivot = rectTransform.pivot;
+            _originalAnchoredPosition = rectTransform.anchoredPosition;
+        }
+
+        private static void RestoreOriginalLayout(RectTransform rectTransform)
+        {
+            if (_trackedCrossHairRect != rectTransform)
+                return;
+
+            rectTransform.anchorMin = _originalAnchorMin;
+            rectTransform.anchorMax = _originalAnchorMax;
+            rectTransform.pivot = _originalPivot;
+            rectTransform.anchoredPosition = _originalAnchoredPosition;
+        }
+
+        private static void PositionCrossHair(RectTransform rectTransform, RectTransform parentRect, Rect cameraRect)
+        {
+            var normalizedCenter = new Vector2(
+                cameraRect.x + cameraRect.width * 0.5f,
+                cameraRect.y + cameraRect.height * 0.5f);
+            var localPoint = new Vector2(
+                (normalizedCenter.x - 0.5f) * parentRect.rect.width,
+                (normalizedCenter.y - 0.5f) * parentRect.rect.height);
+
+            rectTransform.anchorMin = new Vector2(0.5f, 0.5f);
+            rectTransform.anchorMax = new Vector2(0.5f, 0.5f);
+            rectTransform.pivot = new Vector2(0.5f, 0.5f);
+            rectTransform.anchoredPosition = localPoint;
+        }
+
+        private static void EnsureP2CrossHair(GameObject sourceCrossHairObject, Component sourceCrossHairImage)
+        {
+            if (sourceCrossHairObject == null)
+                return;
+
+            if (_p2CrossHairObject != null && _trackedCrossHairObject != sourceCrossHairObject)
+                DestroyP2CrossHair();
+
+            if (_p2CrossHairObject != null)
+                return;
+
+            _trackedCrossHairObject = sourceCrossHairObject;
+            _p2CrossHairObject = UnityEngine.Object.Instantiate(sourceCrossHairObject, sourceCrossHairObject.transform.parent);
+            _p2CrossHairObject.name = sourceCrossHairObject.name + "_P2";
+            _p2CrossHairObject.transform.SetSiblingIndex(sourceCrossHairObject.transform.GetSiblingIndex() + 1);
+            _p2CrossHairRect = _p2CrossHairObject.GetComponent<RectTransform>();
+            if (_p2CrossHairRect == null)
+                _p2CrossHairRect = _p2CrossHairObject.GetComponentInChildren<RectTransform>(true);
+            _p2CrossHairImage = FindUiImageComponent(_p2CrossHairObject, sourceCrossHairImage != null ? sourceCrossHairImage.GetType() : null);
+        }
+
+        private static void SyncP2CrossHairState(object gameplayUi, GameObject sourceCrossHairObject, Component sourceCrossHairImage)
+        {
+            if (_p2CrossHairObject == null)
+                return;
+
+            _p2CrossHairObject.SetActive(sourceCrossHairObject != null && sourceCrossHairObject.activeSelf);
+
+            bool enabled = GetUiComponentEnabled(sourceCrossHairImage);
+            SetUiComponentEnabled(_p2CrossHairImage, enabled);
+
+            var color = SplitScreenMod.P2WebTargetActive
+                ? GetColorField(gameplayUi, ref _webTargetActiveColorField, "webTargetActiveColor")
+                : GetColorField(gameplayUi, ref _noWebTargetActiveColorField, "noWebTargetActiveColor");
+            SetUiComponentColor(_p2CrossHairImage, color);
+        }
+
+        private static void DestroyP2CrossHair()
+        {
+            if (_p2CrossHairObject != null)
+                UnityEngine.Object.Destroy(_p2CrossHairObject);
+
+            _p2CrossHairObject = null;
+            _p2CrossHairRect = null;
+            _p2CrossHairImage = null;
+            _trackedCrossHairObject = null;
+        }
+
+        private static Component FindUiImageComponent(GameObject root, Type preferredType = null)
+        {
+            if (root == null)
+                return null;
+
+            if (preferredType != null)
+            {
+                var preferred = root.GetComponentInChildren(preferredType, true) as Component;
+                if (preferred != null)
+                    return preferred;
+            }
+
+            var components = root.GetComponentsInChildren<Component>(true);
+            for (int i = 0; i < components.Length; i++)
+            {
+                var component = components[i];
+                if (component == null)
+                    continue;
+
+                var fullName = component.GetType().FullName;
+                if (string.Equals(fullName, "UnityEngine.UI.Image", StringComparison.Ordinal))
+                    return component;
+            }
+
+            return null;
+        }
+
+        private static bool GetUiComponentEnabled(Component component)
+        {
+            if (component == null)
+                return false;
+
+            if (_uiEnabledProperty == null || _uiEnabledProperty.DeclaringType != component.GetType())
+                _uiEnabledProperty = component.GetType().GetProperty("enabled", BindingFlags.Instance | BindingFlags.Public);
+
+            if (_uiEnabledProperty != null && _uiEnabledProperty.CanRead)
+                return (bool)_uiEnabledProperty.GetValue(component, null);
+
+            return component.gameObject.activeSelf;
+        }
+
+        private static void SetUiComponentEnabled(Component component, bool enabled)
+        {
+            if (component == null)
+                return;
+
+            if (_uiEnabledProperty == null || _uiEnabledProperty.DeclaringType != component.GetType())
+                _uiEnabledProperty = component.GetType().GetProperty("enabled", BindingFlags.Instance | BindingFlags.Public);
+
+            if (_uiEnabledProperty != null && _uiEnabledProperty.CanWrite)
+                _uiEnabledProperty.SetValue(component, enabled, null);
+        }
+
+        private static void SetUiComponentColor(Component component, Color color)
+        {
+            if (component == null)
+                return;
+
+            if (_uiColorProperty == null || _uiColorProperty.DeclaringType != component.GetType())
+                _uiColorProperty = component.GetType().GetProperty("color", BindingFlags.Instance | BindingFlags.Public);
+
+            if (_uiColorProperty != null && _uiColorProperty.CanWrite)
+                _uiColorProperty.SetValue(component, color, null);
+        }
+
+        private static Color GetColorField(object gameplayUi, ref FieldInfo field, string fieldName)
+        {
+            if (field == null)
+                field = gameplayUi.GetType().GetField(fieldName, BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+
+            if (field != null)
+                return (Color)field.GetValue(gameplayUi);
+
+            return Color.white;
         }
     }
 
