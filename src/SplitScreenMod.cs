@@ -2376,6 +2376,8 @@ namespace AWJSplitScreen
 
         // Per-player P2 state hosting
         private Component _p2BodyMovement;
+        private PropertyInfo _p2BodyMovementBallProp;
+        private static PropertyInfo _settingsArachnophobiaModeProp;
         private Transform _p2Root;
         private Transform _p2WebTargetTr;
         private Transform _p2WebAnchorTr;
@@ -3071,6 +3073,73 @@ namespace AWJSplitScreen
             try { f.SetValue(_p1WebController, value); } catch (Exception ex) { if (_logger != null) _logger.Warning("[P2WebManager] SetField " + f.Name + " failed: " + ex.Message); }
         }
 
+        private static bool IsArachnophobiaModeEnabled()
+        {
+            try
+            {
+                if (_settingsArachnophobiaModeProp == null)
+                {
+                    var settingsType = AccessTools.TypeByName("_Scripts.Singletons.SettingsController");
+                    if (settingsType != null)
+                        _settingsArachnophobiaModeProp = settingsType.GetProperty("ArachnophobiaMode", BindingFlags.Static | BindingFlags.Public);
+                }
+
+                if (_settingsArachnophobiaModeProp == null)
+                    return false;
+
+                object value = _settingsArachnophobiaModeProp.GetValue(null, null);
+                return value is bool enabled && enabled;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private Transform ResolveP2WebStartPoint()
+        {
+            Transform start = null;
+
+            if (_p2BodyMovement != null)
+            {
+                if (_p2BodyMovementBallProp == null)
+                {
+                    try
+                    {
+                        _p2BodyMovementBallProp = _p2BodyMovement.GetType().GetProperty("Ball", BindingFlags.Instance | BindingFlags.Public);
+                    }
+                    catch { }
+                }
+
+                if (_p2BodyMovementBallProp != null)
+                {
+                    try { start = _p2BodyMovementBallProp.GetValue(_p2BodyMovement, null) as Transform; }
+                    catch { }
+                }
+            }
+
+            if (!IsArachnophobiaModeEnabled())
+                start = _p2Root != null ? _p2Root : start;
+
+            if (start == null)
+                start = _p2Root;
+
+            if (start == null)
+                start = _p2InputTransform;
+
+            if (start == null && _p2Rigidbody != null)
+                start = _p2Rigidbody.transform;
+
+            return start;
+        }
+
+        private void RefreshP2WebStartPointReference()
+        {
+            _p2WebStartPoint = ResolveP2WebStartPoint();
+            if (_p2Capsule != null)
+                _p2Capsule.webStartPoint = _p2WebStartPoint;
+        }
+
         private void SaveLive(WcCapsule c)
         {
             if (c == null || _p1WebController == null) return;
@@ -3180,6 +3249,7 @@ namespace AWJSplitScreen
                 }
             }
             catch { }
+            RefreshP2WebStartPointReference();
             LoadLive(_p2Capsule);
 
             // Mirror BodyMovement / WebStartPoint into the live state for P2 if available
@@ -3295,6 +3365,7 @@ namespace AWJSplitScreen
                 try
                 {
                     var rootProp = bodyMovementType.GetProperty("Root", BindingFlags.Public | BindingFlags.Instance);
+                    _p2BodyMovementBallProp = bodyMovementType.GetProperty("Ball", BindingFlags.Public | BindingFlags.Instance);
                     if (rootProp != null) _p2Root = rootProp.GetValue(_p2BodyMovement, null) as Transform;
                     if (_p2Root == null)
                     {
@@ -3380,35 +3451,12 @@ namespace AWJSplitScreen
                 if (_p2WebAnchorTr != null) _p2Capsule.webAnchor = _p2WebAnchorTr;
                 if (_p2PlayerWebJoint != null) _p2Capsule.playerWebJoint = _p2PlayerWebJoint;
 
-                // Create a P2-owned webStartPoint Transform parented to P2's input transform.
-                // The cached webStartPoint field is read directly by AttachWeb when wiring up
-                // the SpringJoint, so we must override it per-player (the getter patch alone
-                // doesn't cover that path).
-                try
-                {
-                    if (_p2InputTransform != null)
-                    {
-                        if (_p2WebStartPoint != null)
-                        {
-                            try { UnityEngine.Object.Destroy(_p2WebStartPoint.gameObject); } catch { }
-                            _p2WebStartPoint = null;
-                        }
-                        var p2WspGo = new GameObject("P2_WebStartPoint");
-                        p2WspGo.transform.SetParent(_p2InputTransform, false);
-                        p2WspGo.transform.localPosition = new Vector3(0f, _webStartHeightOffset, 0f);
-                        p2WspGo.transform.localRotation = Quaternion.identity;
-                        _p2WebStartPoint = p2WspGo.transform;
-                        _p2Capsule.webStartPoint = _p2WebStartPoint;
-                    }
-                    else if (_logger != null)
-                    {
-                        _logger.Warning("[P2WebManager] _p2InputTransform null — cannot create P2 webStartPoint; webs may render from P1.");
-                    }
-                }
-                catch (Exception ex)
-                {
-                    if (_logger != null) _logger.Warning("[P2WebManager] Create P2 webStartPoint failed: " + ex.Message);
-                }
+                // WebController uses BodyMovement.Root and switches to BodyMovement.Ball in
+                // arachnophobia mode. Mirror that exact source transform for P2 so the
+                // grapple originates from inside the spider instead of below it.
+                RefreshP2WebStartPointReference();
+                if (_p2WebStartPoint == null && _logger != null)
+                    _logger.Warning("[P2WebManager] Couldn't resolve a P2 web start transform; falling back to InputTransform/camera math.");
 
                 // P2 starts with no active web/joint.
                 _p2Capsule.webActive = false;
@@ -3708,6 +3756,8 @@ namespace AWJSplitScreen
             // Fall back to the camera position if no start point has been
             // wired up yet (e.g., before InitializeP2WebState).
             Vector3 start;
+            RefreshP2WebStartPointReference();
+
             if (_p2WebStartPoint != null) start = _p2WebStartPoint.position;
             else if (_p2InputTransform != null) start = _p2InputTransform.position;
             else if (_p2Camera != null) start = _p2Camera.transform.position;
@@ -3790,14 +3840,16 @@ namespace AWJSplitScreen
 
             _grappleLine.enabled = true;
 
-            // Start: P2's dedicated web start point — fall back to InputTransform offset, then root.
+            RefreshP2WebStartPointReference();
+
+            // Start: mirror WebController's live webStartPoint source (Root or Ball).
             Vector3 startPos;
             if (_p2WebStartPoint != null)
                 startPos = _p2WebStartPoint.position;
-            else if (_p2InputTransform != null)
-                startPos = _p2InputTransform.position + Vector3.up * _webStartHeightOffset;
             else if (_p2Root != null)
                 startPos = _p2Root.position;
+            else if (_p2InputTransform != null)
+                startPos = _p2InputTransform.position + Vector3.up * _webStartHeightOffset;
             else if (_p2Rigidbody != null)
                 startPos = _p2Rigidbody.position;
             else
@@ -3855,7 +3907,6 @@ namespace AWJSplitScreen
             }
             if (_p2WebStartPoint != null)
             {
-                try { UnityEngine.Object.Destroy(_p2WebStartPoint.gameObject); } catch { }
                 _p2WebStartPoint = null;
             }
 
@@ -3883,6 +3934,7 @@ namespace AWJSplitScreen
             _p2Camera = null;
             _p2InputTransform = null;
             _p2Rigidbody = null;
+            _p2BodyMovementBallProp = null;
             SplitScreenMod.P2WebActive = false;
             SplitScreenMod.P2WebTargetActive = false;
             _inited = false;
