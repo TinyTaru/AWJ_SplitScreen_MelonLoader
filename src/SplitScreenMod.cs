@@ -56,6 +56,7 @@ namespace AWJSplitScreen
         private static MelonPreferences_Entry<float> _p2TriggerThresholdPref;
         private static MelonPreferences_Entry<bool> _filterP1FromP2PadPref;
         private static MelonPreferences_Entry<float> _p2CameraDistancePref;
+        private static bool _swapPlayerControllers;
 
         // P2 keyboard fallback keys
         private const string P2JumpKeyProp = "spaceKey";
@@ -187,18 +188,57 @@ namespace AWJSplitScreen
             SceneManager.sceneLoaded += (_, __) => MelonCoroutines.Start(DeferredSetup());
 
             LoggerInstance.Msg("AWJ Split Screen + P2 Inject v0.2.2 loaded.");
-            LoggerInstance.Msg("F9 split, F10 orientation | P2 Move: IJKL or Gamepad LStick | P2 Sprint: LStick click (toggle) | P2 Look: N/M or RStickX | P2 Zoom: RStick press | P2 Jump: A | P2 Interact: H/X | P2 Web: RT shoot/release, LT quick build, LB fixed anchor, RB moving anchor, B delete/cancel.");
+            LoggerInstance.Msg("F8 swap controllers, F9 split, F10 orientation | P2 Move: IJKL or Gamepad LStick | P2 Sprint: LStick click (toggle) | P2 Look: N/M or RStickX | P2 Zoom: RStick press | P2 Jump: A | P2 Interact: H/X | P2 Web: RT shoot/release, LT quick build, LB fixed anchor, RB moving anchor, B delete/cancel.");
             LoggerInstance.Msg("Tip: If both controllers still move P1, ensure FilterP1FromP2Gamepad=true and P2_GamepadIndex is the second pad (usually 1).");
         }
 
         private void ApplyPrefsToStatics()
         {
             P2UseGamepad = _p2UseGamepadPref.Value;
-            P2GamepadIndex = _p2GamepadIndexPref.Value;
+            P2GamepadIndex = ResolveP2GamepadIndex(_p2GamepadIndexPref.Value);
             P2Deadzone = _p2DeadzonePref.Value;
             P2TriggerThreshold = _p2TriggerThresholdPref.Value;
             FilterP1FromP2Gamepad = _filterP1FromP2PadPref.Value;
             P2CameraDistance = Mathf.Clamp(_p2CameraDistancePref.Value, 1.0f, 14f);
+        }
+
+        private int ResolveP2GamepadIndex(int configuredIndex)
+        {
+            int normalized = Mathf.Max(0, configuredIndex);
+            if (!_swapPlayerControllers)
+                return normalized;
+
+            int count = InputCompat.GetConnectedGamepadCount();
+            if (count < 2)
+                return normalized;
+
+            if (normalized != 0)
+                return 0;
+
+            return count > 1 ? 1 : 0;
+        }
+
+        private void ToggleControllerAssignments()
+        {
+            if (!P2UseGamepad)
+            {
+                LoggerInstance.Warning("Can't swap controllers while P2 gamepad input is disabled.");
+                return;
+            }
+
+            int count = InputCompat.GetConnectedGamepadCount();
+            if (count < 2)
+            {
+                LoggerInstance.Warning("Need at least two connected gamepads to swap controller ownership.");
+                return;
+            }
+
+            _swapPlayerControllers = !_swapPlayerControllers;
+            ApplyPrefsToStatics();
+
+            LoggerInstance.Msg(_swapPlayerControllers
+                ? "Controllers swapped. P2 now uses the primary gamepad."
+                : "Controllers restored. P2 is back on its configured gamepad.");
         }
 
         public override void OnDeinitializeMelon()
@@ -880,6 +920,9 @@ namespace AWJSplitScreen
                     LoggerInstance.Msg("Split mode: " + _splitMode.Value);
                 }
             }
+
+            if (InputCompat.Down_F8())
+                ToggleControllerAssignments();
 
             if (_enabled.Value)
             {
@@ -5654,6 +5697,7 @@ namespace AWJSplitScreen
             catch { return false; }
         }
 
+        public static bool Down_F8() { return Down("f8Key", KeyCode.F8); }
         public static bool Down_F9() { return Down("f9Key", KeyCode.F9); }
         public static bool Down_F10() { return Down("f10Key", KeyCode.F10); }
 
@@ -5811,6 +5855,16 @@ namespace AWJSplitScreen
                 return _gamepadSnapshot[index];
             }
             catch { return null; }
+        }
+
+        public static int GetConnectedGamepadCount()
+        {
+            try
+            {
+                RefreshGamepadSnapshot();
+                return _gamepadSnapshotCount;
+            }
+            catch { return 0; }
         }
 
         private static object GetP2Gamepad(int index)
