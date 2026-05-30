@@ -5480,41 +5480,13 @@ namespace AWJSplitScreen
                     _p2Underwater = true;
                     // Only start the ambience if it isn't already running because of P1.
                     if (!P1IsUnderwater())
-                    {
-                        try
-                        {
-                            var mcType = AccessTools.TypeByName("_Scripts.Singletons.MusicController");
-                            var inst = SingletonInstance(mcType);
-                            if (inst != null)
-                            {
-                                var m = mcType.GetMethod("StartUnderwater",
-                                    BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
-                                    null, Type.EmptyTypes, null);
-                                if (m != null) m.Invoke(inst, null);
-                            }
-                        }
-                        catch { }
-                    }
+                        InvokeMusicControllerMethod("StartUnderwater");
                 }
                 else if (_p2Underwater && _p2Counter == 0)
                 {
                     _p2Underwater = false;
                     if (!P1IsUnderwater())
-                    {
-                        try
-                        {
-                            var mcType = AccessTools.TypeByName("_Scripts.Singletons.MusicController");
-                            var inst = SingletonInstance(mcType);
-                            if (inst != null)
-                            {
-                                var m = mcType.GetMethod("StopUnderwater",
-                                    BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
-                                    null, Type.EmptyTypes, null);
-                                if (m != null) m.Invoke(inst, null);
-                            }
-                        }
-                        catch { }
-                    }
+                        InvokeMusicControllerMethod("StopUnderwater");
                 }
             }
             catch { }
@@ -5553,8 +5525,30 @@ namespace AWJSplitScreen
 
         public static void Reset()
         {
+            bool shouldStopUnderwater = _p2Underwater && !P1IsUnderwater();
             _p2Counter = 0;
             _p2Underwater = false;
+
+            if (shouldStopUnderwater)
+                InvokeMusicControllerMethod("StopUnderwater");
+        }
+
+        private static void InvokeMusicControllerMethod(string methodName)
+        {
+            try
+            {
+                var mcType = AccessTools.TypeByName("_Scripts.Singletons.MusicController");
+                var inst = SingletonInstance(mcType);
+                if (inst == null)
+                    return;
+
+                var method = mcType.GetMethod(methodName,
+                    BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+                    null, Type.EmptyTypes, null);
+                if (method != null)
+                    method.Invoke(inst, null);
+            }
+            catch { }
         }
     }
 
