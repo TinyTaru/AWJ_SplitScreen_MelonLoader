@@ -278,7 +278,8 @@ namespace AWJSplitScreen
                     var fixedUpdate = AccessTools.Method(bodyMoveType, "FixedUpdate");
                     if (fixedUpdate != null)
                         h.Patch(fixedUpdate,
-                            prefix: new HarmonyMethod(typeof(BodyMovementPatches), nameof(BodyMovementPatches.FixedUpdate_Prefix)));
+                            prefix: new HarmonyMethod(typeof(BodyMovementPatches), nameof(BodyMovementPatches.FixedUpdate_Prefix)),
+                            postfix: new HarmonyMethod(typeof(BodyMovementPatches), nameof(BodyMovementPatches.FixedUpdate_Postfix)));
 
                     var npcWalk = AccessTools.Method(bodyMoveType, "NpcWalk");
                     if (npcWalk != null)
@@ -751,6 +752,42 @@ namespace AWJSplitScreen
             catch (Exception ex)
             {
                 LoggerInstance.Warning("WebThread.DeleteWebThread patch failed (non-fatal): " + ex);
+            }
+
+            // Immediate Unity hierarchy destruction — if P2 is parented to a surface being
+            // destroyed right now, detach first so the spider is not destroyed with it.
+            try
+            {
+                var destroyNow = typeof(UnityEngine.Object).GetMethod("Destroy",
+                    BindingFlags.Public | BindingFlags.Static,
+                    null,
+                    new Type[] { typeof(UnityEngine.Object), typeof(float) },
+                    null);
+                if (destroyNow != null)
+                {
+                    h.Patch(destroyNow,
+                        prefix: new HarmonyMethod(typeof(UnityDestroyDetachPatches),
+                            nameof(UnityDestroyDetachPatches.Destroy_Prefix)));
+                }
+
+                var destroyImmediate = typeof(UnityEngine.Object).GetMethod("DestroyImmediate",
+                    BindingFlags.Public | BindingFlags.Static,
+                    null,
+                    new Type[] { typeof(UnityEngine.Object), typeof(bool) },
+                    null);
+                if (destroyImmediate != null)
+                {
+                    h.Patch(destroyImmediate,
+                        prefix: new HarmonyMethod(typeof(UnityDestroyDetachPatches),
+                            nameof(UnityDestroyDetachPatches.DestroyImmediate_Prefix)));
+                }
+
+                if (destroyNow != null || destroyImmediate != null)
+                    LoggerInstance.Msg("Patched immediate Unity destroy paths to detach grounded P2 before hierarchy teardown.");
+            }
+            catch (Exception ex)
+            {
+                LoggerInstance.Warning("Unity destroy detach patch failed (non-fatal): " + ex);
             }
         }
 
@@ -2271,6 +2308,7 @@ namespace AWJSplitScreen
             // Drop cached LegController identity mappings — they reference
             // instanceIDs that may belong to the destroyed P2 spider.
             try { LegControllerPatches.ClearCache(); } catch { }
+            try { P2MovableCollisionHelper.Reset(); } catch { }
 
             _webController = null;
             _p2SpiderInteraction = null;
@@ -4859,6 +4897,14 @@ namespace AWJSplitScreen
             }
         }
 
+        public static void FixedUpdate_Postfix(object __instance)
+        {
+            if (!IsP2(__instance))
+                return;
+
+            P2MovableCollisionHelper.SyncForBodyMovement(__instance as Component);
+        }
+
         public static void NpcWalk_Postfix(object __instance)
         {
             if (!IsP2(__instance)) return;
@@ -5531,47 +5577,257 @@ namespace AWJSplitScreen
     // re-parented away first. BodyMovement.PerformWalking parents the spider
     // GameObject and its targetTransform to the walked-on surface; if that surface
     // is a WebThread being destroyed, Unity would destroy the P2 spider with it.
+    internal static class P2DestroyDetachHelper
+    {
+        private static FieldInfo _targetTransformField;
+        private static PropertyInfo _targetTransformProp;
+        private static FieldInfo _targetRigidbodyField;
+        private static FieldInfo _targetMaterialField;
+        private static FieldInfo _targetMovableObjectField;
+        private static FieldInfo _oldTargetTransformParentField;
+        private static Type _cachedBodyMovementType;
+
+        private static void CacheBodyMovementMembers(Type bmType)
+        {
+            if (bmType == null || object.ReferenceEquals(_cachedBodyMovementType, bmType))
+                return;
+
+            _cachedBodyMovementType = bmType;
+            _targetTransformProp = bmType.GetProperty("TargetTransform",
+                BindingFlags.Public | BindingFlags.Instance);
+            _targetTransformField = bmType.GetField("targetTransform",
+                BindingFlags.NonPublic | BindingFlags.Instance);
+            _targetRigidbodyField = bmType.GetField("targetRigidbody",
+                BindingFlags.NonPublic | BindingFlags.Instance);
+            _targetMaterialField = bmType.GetField("targetMaterial",
+                BindingFlags.NonPublic | BindingFlags.Instance);
+            _targetMovableObjectField = bmType.GetField("targetMovableObject",
+                BindingFlags.NonPublic | BindingFlags.Instance);
+            _oldTargetTransformParentField = bmType.GetField("oldTargetTransformParent",
+                BindingFlags.NonPublic | BindingFlags.Instance);
+        }
+
+        private static Transform GetTargetTransform(Component p2bm)
+        {
+            if (p2bm == null)
+                return null;
+
+            var bmType = p2bm.GetType();
+            CacheBodyMovementMembers(bmType);
+
+            try
+            {
+                if (_targetTransformProp != null)
+                    return _targetTransformProp.GetValue(p2bm, null) as Transform;
+            }
+            catch { }
+
+            try
+            {
+                if (_targetTransformField != null)
+                    return _targetTransformField.GetValue(p2bm) as Transform;
+            }
+            catch { }
+
+            return null;
+        }
+
+        public static void DetachFromDestroyedRoot(Transform deletedRoot)
+        {
+            if (deletedRoot == null)
+                return;
+
+            try
+            {
+                var p2bm = SplitScreenMod.P2BodyMovementInstance;
+                Transform spiderT = (p2bm != null) ? p2bm.transform : null;
+                if (spiderT == null)
+                    return;
+
+                // Ignore teardown of P2's own hierarchy; this fix is only for external
+                // surfaces that temporarily become the walking parent.
+                if (object.ReferenceEquals(deletedRoot, spiderT) || deletedRoot.IsChildOf(spiderT))
+                    return;
+
+                var targetT = GetTargetTransform(p2bm);
+                bool spiderWillBeDestroyed = spiderT.IsChildOf(deletedRoot);
+                bool targetWillBeDestroyed = targetT != null && targetT.IsChildOf(deletedRoot);
+                if (!spiderWillBeDestroyed && !targetWillBeDestroyed)
+                    return;
+
+                if (spiderWillBeDestroyed)
+                    spiderT.SetParent(null, true);
+
+                if (targetWillBeDestroyed)
+                    targetT.SetParent(spiderT != null ? spiderT : null, true);
+
+                var bmType = p2bm.GetType();
+                CacheBodyMovementMembers(bmType);
+
+                if (_targetRigidbodyField != null)
+                    _targetRigidbodyField.SetValue(p2bm, null);
+                if (_targetMaterialField != null)
+                    _targetMaterialField.SetValue(p2bm, null);
+                if (_targetMovableObjectField != null)
+                    _targetMovableObjectField.SetValue(p2bm, null);
+                if (_oldTargetTransformParentField != null)
+                    _oldTargetTransformParentField.SetValue(p2bm, targetT != null ? targetT.parent : null);
+            }
+            catch
+            {
+                // Defensive: never block the original destroy path.
+            }
+        }
+
+        public static object GetTargetMovableObject(Component bodyMovement)
+        {
+            if (bodyMovement == null)
+                return null;
+
+            var bmType = bodyMovement.GetType();
+            CacheBodyMovementMembers(bmType);
+
+            try
+            {
+                return _targetMovableObjectField != null ? _targetMovableObjectField.GetValue(bodyMovement) : null;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+    }
+
+    internal static class P2MovableCollisionHelper
+    {
+        private static object _trackedMovableObject;
+        private static Type _cachedMovableObjectType;
+        private static FieldInfo _collidersField;
+        private static int _p2Layer = int.MinValue;
+
+        private static int GetP2ExcludeMask()
+        {
+            if (_p2Layer == int.MinValue)
+                _p2Layer = LayerMask.NameToLayer("Ignore Raycast");
+
+            if (_p2Layer < 0)
+                return 0;
+
+            return 1 << _p2Layer;
+        }
+
+        private static void CacheMovableMembers(object movableObject)
+        {
+            if (movableObject == null)
+                return;
+
+            var movableType = movableObject.GetType();
+            if (ReferenceEquals(_cachedMovableObjectType, movableType))
+                return;
+
+            _cachedMovableObjectType = movableType;
+            _collidersField = movableType.GetField("colliders",
+                BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+        }
+
+        private static void ApplyP2CollisionExclusion(object movableObject, bool exclude)
+        {
+            int p2ExcludeMask = GetP2ExcludeMask();
+            if (p2ExcludeMask == 0 || movableObject == null)
+                return;
+
+            CacheMovableMembers(movableObject);
+            if (_collidersField == null)
+                return;
+
+            try
+            {
+                var colliders = _collidersField.GetValue(movableObject) as System.Collections.IEnumerable;
+                if (colliders == null)
+                    return;
+
+                foreach (var entry in colliders)
+                {
+                    var collider = entry as Collider;
+                    if (collider == null)
+                        continue;
+
+                    int excludeMask = collider.excludeLayers.value;
+                    excludeMask = exclude
+                        ? (excludeMask | p2ExcludeMask)
+                        : (excludeMask & ~p2ExcludeMask);
+                    collider.excludeLayers = excludeMask;
+                }
+            }
+            catch
+            {
+            }
+        }
+
+        public static void SyncForBodyMovement(Component bodyMovement)
+        {
+            if (!SplitScreenMod.IsSplitScreenActive ||
+                bodyMovement == null ||
+                !ReferenceEquals(bodyMovement, SplitScreenMod.P2BodyMovementInstance))
+            {
+                Reset();
+                return;
+            }
+
+            object currentMovableObject = P2DestroyDetachHelper.GetTargetMovableObject(bodyMovement);
+            if (!ReferenceEquals(currentMovableObject, _trackedMovableObject))
+            {
+                ApplyP2CollisionExclusion(_trackedMovableObject, false);
+                _trackedMovableObject = currentMovableObject;
+            }
+
+            ApplyP2CollisionExclusion(_trackedMovableObject, _trackedMovableObject != null);
+        }
+
+        public static void Reset()
+        {
+            ApplyP2CollisionExclusion(_trackedMovableObject, false);
+            _trackedMovableObject = null;
+        }
+    }
+
     internal static class WebThreadDeletePatches
     {
         public static void DeleteWebThread_Prefix(MonoBehaviour __instance)
         {
             if (__instance == null) return;
-            try
-            {
-                var deletedRoot = __instance.transform;
-                if (deletedRoot == null) return;
+            P2DestroyDetachHelper.DetachFromDestroyedRoot(__instance.transform);
+        }
+    }
 
-                // P2 spider
-                var p2bm = SplitScreenMod.P2BodyMovementInstance;
-                Transform spiderT = (p2bm != null) ? p2bm.transform : null;
-                if (spiderT != null && spiderT.IsChildOf(deletedRoot))
-                {
-                    spiderT.SetParent(null, true);
-                }
+    internal static class UnityDestroyDetachPatches
+    {
+        private static Transform ResolveDestroyedRoot(UnityEngine.Object obj)
+        {
+            if (obj is GameObject go)
+                return go.transform;
 
-                // P2 BodyMovement.targetTransform (private field)
-                if (p2bm != null)
-                {
-                    Transform targetT = null;
-                    var bmType = p2bm.GetType();
-                    var tProp = bmType.GetProperty("TargetTransform",
-                        BindingFlags.Public | BindingFlags.Instance);
-                    if (tProp != null) targetT = tProp.GetValue(p2bm, null) as Transform;
-                    if (targetT == null)
-                    {
-                        var tField = bmType.GetField("targetTransform",
-                            BindingFlags.NonPublic | BindingFlags.Instance);
-                        if (tField != null) targetT = tField.GetValue(p2bm) as Transform;
-                    }
-                    if (targetT != null && targetT.IsChildOf(deletedRoot))
-                    {
-                        // Reparent to spider — matches BodyMovement's own behavior
-                        // when it loses ground contact (BodyMovement.cs line 1114).
-                        targetT.SetParent(spiderT != null ? spiderT : null, true);
-                    }
-                }
-            }
-            catch { /* defensive — never block the original delete */ }
+            if (obj is Transform tr)
+                return tr;
+
+            return null;
+        }
+
+        public static void Destroy_Prefix(UnityEngine.Object obj, float t)
+        {
+            if (t > 0f)
+                return;
+
+            var deletedRoot = ResolveDestroyedRoot(obj);
+            if (deletedRoot != null)
+                P2DestroyDetachHelper.DetachFromDestroyedRoot(deletedRoot);
+        }
+
+        public static void DestroyImmediate_Prefix(UnityEngine.Object obj, bool allowDestroyingAssets)
+        {
+            var deletedRoot = ResolveDestroyedRoot(obj);
+            if (deletedRoot != null)
+                P2DestroyDetachHelper.DetachFromDestroyedRoot(deletedRoot);
         }
     }
 
