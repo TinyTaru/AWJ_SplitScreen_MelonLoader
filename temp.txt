@@ -1,0 +1,8 @@
+                }
+            }
+            catch (Exception ex)
+            {
+                LoggerInstance.Warning("MusicController.StopUnderwater patch failed (non-fatal): " + ex);
+            }
+            // WebThread.DeleteWebThread — when a WebThread is about to be destroyed,
+            // detach any P2 transforms (spider, targetTransform) that may be parented

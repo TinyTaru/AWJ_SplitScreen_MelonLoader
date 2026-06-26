@@ -1,5 +1,7 @@
 using MelonLoader;
 using UnityEngine;
+using UnityEngine.Rendering;
+using UnityEngine.Rendering.Universal;
 using UnityEngine.SceneManagement;
 using System;
 using System.Collections.Generic;
@@ -187,9 +189,51 @@ namespace AWJSplitScreen
 
             SceneManager.sceneLoaded += (_, __) => MelonCoroutines.Start(DeferredSetup());
 
+            RenderPipelineManager.beginCameraRendering += OnBeginCameraRendering;
+            RenderPipelineManager.endCameraRendering += OnEndCameraRendering;
+
             LoggerInstance.Msg("AWJ Split Screen + P2 Inject v0.2.2 loaded.");
             LoggerInstance.Msg("F8 swap controllers, F9 split, F10 orientation | P2 Move: IJKL or Gamepad LStick | P2 Sprint: LStick click (toggle) | P2 Look: N/M or RStickX | P2 Zoom: RStick press | P2 Jump: A | P2 Interact: H/X | P2 Web: RT shoot/release, LT quick build, LB fixed anchor, RB moving anchor, B delete/cancel.");
             LoggerInstance.Msg("Tip: If both controllers still move P1, ensure FilterP1FromP2Gamepad=true and P2_GamepadIndex is the second pad (usually 1).");
+        }
+
+        public static bool P1CameraUnderwater = false;
+        public static bool P2CameraUnderwater = false;
+        public static VolumeProfile[] TrackedWaterProfiles = null;
+
+        private void OnBeginCameraRendering(ScriptableRenderContext context, Camera camera)
+        {
+            if (TrackedWaterProfiles == null) return;
+            bool isP2 = (camera != null && camera == _camRightOrBottom);
+            bool isP1 = (camera != null && camera == _camLeftOrTop);
+            
+            // Default to false for UI/other cameras?
+            bool waterState = false;
+            if (isP1) waterState = P1CameraUnderwater;
+            else if (isP2) waterState = P2CameraUnderwater;
+            // if neither, it might be a UI camera, skip or apply false. We'll apply false.
+
+            ApplyWaterProfileState(waterState);
+        }
+
+        private void OnEndCameraRendering(ScriptableRenderContext context, Camera camera)
+        {
+            if (TrackedWaterProfiles == null) return;
+            // Revert state so other effects don't get the filter accidentally,
+            // though the next camera's OnBegin will set it again.
+            ApplyWaterProfileState(false);
+        }
+
+        private static void ApplyWaterProfileState(bool value)
+        {
+            foreach (var profile in TrackedWaterProfiles)
+            {
+                if (profile == null) continue;
+                if (profile.TryGet<ColorAdjustments>(out var ca))
+                    ca.colorFilter.overrideState = value;
+                if (profile.TryGet<PaniniProjection>(out var pp))
+                    pp.active = value;
+            }
         }
 
         private void ApplyPrefsToStatics()
@@ -728,6 +772,29 @@ namespace AWJSplitScreen
             {
                 LoggerInstance.Warning("MusicController.StopUnderwater patch failed (non-fatal): " + ex);
             }
+                        try
+            {
+                var cwtType = AccessTools.TypeByName("_Scripts.Camera.CameraWaterTrigger");
+                if (cwtType != null)
+                {
+                    var m = cwtType.GetMethod("EnableUnderWaterPostProcessing", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                    if (m != null)
+                    {
+                        h.Patch(m, prefix: new HarmonyMethod(typeof(CameraWaterTriggerPatches), nameof(CameraWaterTriggerPatches.EnableUnderWaterPostProcessing_Prefix)));
+                        LoggerInstance.Msg("Patched CameraWaterTrigger for per-player filter.");
+                    }
+                    var startMethod = cwtType.GetMethod("Start", BindingFlags.Instance | BindingFlags.NonPublic);
+                    if (startMethod != null)
+                    {
+                        h.Patch(startMethod, postfix: new HarmonyMethod(typeof(CameraWaterTriggerPatches), nameof(CameraWaterTriggerPatches.Start_Postfix)));
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                LoggerInstance.Warning("CameraWaterTrigger patch failed (non-fatal): " + ex);
+            }
+
             // WebThread.DeleteWebThread — when a WebThread is about to be destroyed,
             // detach any P2 transforms (spider, targetTransform) that may be parented
             // to it. BodyMovement.PerformWalking parents the spider to the surface it
@@ -2205,6 +2272,8 @@ namespace AWJSplitScreen
 
                 var fullName = behaviour.GetType().FullName;
                 if (string.IsNullOrEmpty(fullName)) continue;
+
+                if (string.Equals(fullName, "_Scripts.Camera.CameraWaterTrigger", StringComparison.Ordinal)) continue;
 
                 if (fullName.StartsWith("_Scripts.Camera.", StringComparison.Ordinal) ||
                     fullName.StartsWith("_Scripts.Singletons.", StringComparison.Ordinal) ||
@@ -6560,6 +6629,48 @@ namespace AWJSplitScreen
             {
                 return false;
             }
+        }
+    }
+
+    internal static class CameraWaterTriggerPatches
+    {
+        public static void Start_Postfix(object __instance)
+        {
+            try
+            {
+                var type = __instance.GetType();
+                var profilesField = AccessTools.Field(type, "globalVolumeProfiles");
+                if (profilesField != null)
+                {
+                    var profiles = profilesField.GetValue(__instance) as UnityEngine.Rendering.VolumeProfile[];
+                    if (profiles != null && profiles.Length > 0 && SplitScreenMod.TrackedWaterProfiles == null)
+                    {
+                        SplitScreenMod.TrackedWaterProfiles = profiles;
+                    }
+                }
+            }
+            catch { }
+        }
+
+        public static bool EnableUnderWaterPostProcessing_Prefix(object __instance, bool value)
+        {
+            var p2Bm = SplitScreenMod.P2BodyMovementInstance;
+            if (p2Bm != null)
+            {
+                var p2Cam = SplitScreenMod.P2Camera;
+                var cam = (__instance as UnityEngine.Component).gameObject;
+                if (cam == p2Cam)
+                {
+                    SplitScreenMod.P2CameraUnderwater = value;
+                    return false;
+                }
+                else
+                {
+                    SplitScreenMod.P1CameraUnderwater = value;
+                    return false;
+                }
+            }
+            return true;
         }
     }
 }

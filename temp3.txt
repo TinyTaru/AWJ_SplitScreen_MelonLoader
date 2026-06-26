@@ -1,0 +1,41 @@
+    internal static class CameraWaterTriggerPatches
+    {
+        public static void Start_Postfix(object __instance)
+        {
+            try
+            {
+                var type = __instance.GetType();
+                var profilesField = AccessTools.Field(type, "globalVolumeProfiles");
+                if (profilesField != null)
+                {
+                    var profiles = profilesField.GetValue(__instance) as UnityEngine.Rendering.VolumeProfile[];
+                    if (profiles != null && profiles.Length > 0 && SplitScreenMod.TrackedWaterProfiles == null)
+                    {
+                        SplitScreenMod.TrackedWaterProfiles = profiles;
+                    }
+                }
+            }
+            catch { }
+        }
+
+        public static bool EnableUnderWaterPostProcessing_Prefix(object __instance, bool value)
+        {
+            var p2Bm = SplitScreenMod.P2BodyMovementInstance;
+            if (p2Bm != null)
+            {
+                var p2Cam = SplitScreenMod.P2Camera;
+                var cam = (__instance as UnityEngine.Component).gameObject;
+                if (cam == p2Cam)
+                {
+                    SplitScreenMod.P2CameraUnderwater = value;
+                    return false;
+                }
+                else
+                {
+                    SplitScreenMod.P1CameraUnderwater = value;
+                    return false;
+                }
+            }
+            return true;
+        }
+    }
