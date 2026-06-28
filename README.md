@@ -1,6 +1,7 @@
 # AWJ Split Screen + P2 Inject (v0.2.2)
 
 ## Important Hotkeys:
+F8  - Swap which controller controls which player.
 F9  - Toggle multiplayer.
 F10 - Flip between horizontal and vertical.
 
@@ -31,10 +32,11 @@ Legend
 🟨 = Partially works on player 2. Likely buggy
 🟥 = Isn't implemented on player 2
 - Basic webs 🟨
-- Advanced webs 🟥
+- Advanced webs 🟨
 - Movement 🟩
 - Camera 🟩
 - Jump 🟩
+- Emotes 🟥
 - Collectables 🟩
 
 Technical Notes:
