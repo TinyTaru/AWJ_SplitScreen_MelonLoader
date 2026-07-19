@@ -25,6 +25,8 @@ namespace AWJSplitScreen
         internal static float P2TriggerThreshold = 0.35f;
         internal static bool FilterP1FromP2Gamepad = true;
         internal static float P2CameraDistance = 5.6f;
+        internal static bool DebugSpeedLog;
+        internal static bool P2SprintDesired;          // authoritative P2 sprint state, held by FixedUpdate_Prefix
 
         internal static bool P2ShootHeld;              // computed each frame & from WebController.Update prefix
         internal static bool P2JumpPressed;            // set in OnUpdate, consumed in FixedUpdate
@@ -41,6 +43,12 @@ namespace AWJSplitScreen
         internal static FieldInfo BodyMove_MoveVectorField;
         internal static FieldInfo BodyMove_JumpInputField;
         internal static FieldInfo BodyMove_SprintInputField;
+        internal static FieldInfo BodyMove_IsSprintingField;
+        internal static FieldInfo BodyMove_MovementSpeedField;
+        internal static FieldInfo BodyMove_BoostFactorField;
+        internal static FieldInfo BodyMove_IsUnderwaterField;
+        internal static FieldInfo BodyMove_UnderwaterFactorField;
+        internal static FieldInfo BodyMove_PotionMultField;
         internal static MethodInfo BodyMove_InitializeJumpMethod;
 
         private const string Cat = "AWJ_SplitScreen";
@@ -58,6 +66,7 @@ namespace AWJSplitScreen
         private static MelonPreferences_Entry<float> _p2TriggerThresholdPref;
         private static MelonPreferences_Entry<bool> _filterP1FromP2PadPref;
         private static MelonPreferences_Entry<float> _p2CameraDistancePref;
+        private static MelonPreferences_Entry<bool> _debugSpeedLogPref;
         private static bool _swapPlayerControllers;
 
         // P2 keyboard fallback keys
@@ -113,7 +122,7 @@ namespace AWJSplitScreen
         // independent manual zoom/index but uses the same exact step values.
         private float[] _p2ZoomArray;
         private int _p2ZoomIndex = -1;
-        private float _p2ManualZoom = 8.0f;
+        private float _p2ManualZoom = 5.6f;   // always re-seeded from P2CameraDistance before use
 
         // P2 BodyMovement reflection cache (for velocity / state input to the zoom curve).
         private Component _p2BodyMovement;
@@ -180,7 +189,24 @@ namespace AWJSplitScreen
             _p2DeadzonePref = _prefs.CreateEntry("P2_GamepadDeadzone", 0.15f, "Deadzone for sticks");
             _p2TriggerThresholdPref = _prefs.CreateEntry("P2_TriggerThreshold", 0.35f, "Trigger threshold for shooting");
             _filterP1FromP2PadPref = _prefs.CreateEntry("FilterP1FromP2Gamepad", true, "Prevent P1 from reacting to P2's gamepad (recommended for 2-controller play)");
-            _p2CameraDistancePref = _prefs.CreateEntry("P2_CameraDistance", 8.0f, "P2 third-person camera distance");
+            _p2CameraDistancePref = _prefs.CreateEntry("P2_CameraDistance", 14.0f, "P2 third-person camera distance (near P1's typical distance)");
+            _debugSpeedLogPref = _prefs.CreateEntry("Debug_SpeedLog", false, "Log P1/P2 horizontal ground speed, moveVector and sprint state once per second");
+
+            // One-time default correction: the log showed P1 sits far (~16) while the
+            // old 8.0 / interim 5.6 defaults left P2 too close. A per-value marker keeps
+            // a deliberately-chosen distance untouched.
+            var p2CamDistMigrated = _prefs.CreateEntry("P2_CameraDistance_Migrated", false,
+                "Internal: one-time marker for the P2_CameraDistance default correction");
+            if (!p2CamDistMigrated.Value)
+            {
+                float cur = _p2CameraDistancePref.Value;
+                if (Mathf.Approximately(cur, 8.0f) || Mathf.Approximately(cur, 5.6f))
+                {
+                    _p2CameraDistancePref.Value = 14.0f;
+                    LoggerInstance.Msg("P2_CameraDistance corrected to 14.0 (closer to P1's typical distance).");
+                }
+                p2CamDistMigrated.Value = true;
+            }
 
             ApplyPrefsToStatics();
 
@@ -193,7 +219,8 @@ namespace AWJSplitScreen
             RenderPipelineManager.endCameraRendering += OnEndCameraRendering;
 
             LoggerInstance.Msg("AWJ Split Screen + P2 Inject v0.2.2 loaded.");
-            LoggerInstance.Msg("F8 swap controllers, F9 split, F10 orientation | P2 Move: IJKL or Gamepad LStick | P2 Sprint: LStick click (toggle) | P2 Look: N/M or RStickX | P2 Zoom: RStick press | P2 Jump: A | P2 Interact: H/X | P2 Web: RT shoot/release, LT quick build, LB fixed anchor, RB moving anchor, B delete/cancel.");
+            LoggerInstance.Msg("F8 swap controllers, F9 split, F10 orientation | P2 Move: IJKL or Gamepad LStick | P2 Sprint: LStick click (toggles on/off in all modes) | P2 Look: N/M or RStickX | P2 Zoom: RStick press | P2 Jump: A | P2 Interact: H/X | P2 Web: RT shoot/release, LT quick build, LB fixed anchor, RB moving anchor, B delete/cancel.");
+            LoggerInstance.Msg("Diagnostics: set Debug_SpeedLog=true in MelonPreferences.cfg to log P1/P2 speed, sprint and camera distance once per second.");
             LoggerInstance.Msg("Tip: If both controllers still move P1, ensure FilterP1FromP2Gamepad=true and P2_GamepadIndex is the second pad (usually 1).");
         }
 
@@ -244,6 +271,7 @@ namespace AWJSplitScreen
             P2TriggerThreshold = _p2TriggerThresholdPref.Value;
             FilterP1FromP2Gamepad = _filterP1FromP2PadPref.Value;
             P2CameraDistance = Mathf.Clamp(_p2CameraDistancePref.Value, 1.0f, 14f);
+            DebugSpeedLog = _debugSpeedLogPref.Value;
         }
 
         private int ResolveP2GamepadIndex(int configuredIndex)
@@ -306,6 +334,12 @@ namespace AWJSplitScreen
                     BodyMove_MoveVectorField = FindFieldByName(bodyMoveType, "moveVector");
                     BodyMove_JumpInputField = FindFieldByName(bodyMoveType, "jumpInput");
                     BodyMove_SprintInputField = FindFieldByName(bodyMoveType, "sprintInput");
+                    BodyMove_IsSprintingField = FindFieldByName(bodyMoveType, "isSprinting");
+                    BodyMove_MovementSpeedField = FindFieldByName(bodyMoveType, "movementSpeed");
+                    BodyMove_BoostFactorField = FindFieldByName(bodyMoveType, "movementBoostFactor");
+                    BodyMove_IsUnderwaterField = FindFieldByName(bodyMoveType, "isUnderwater");
+                    BodyMove_UnderwaterFactorField = FindFieldByName(bodyMoveType, "movementUnderwaterFactor");
+                    BodyMove_PotionMultField = FindFieldByName(bodyMoveType, "currentAncientPotionSpeedMultiplier");
                     BodyMove_InitializeJumpMethod = bodyMoveType.GetMethod("InitializeJump",
                         BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
 
@@ -913,6 +947,14 @@ namespace AWJSplitScreen
             yield return null;
             Teardown();
 
+            // Scene loads destroy the P1 camera components these caches point at, so
+            // drop them on every setup pass (scene load or F9-enable both come through
+            // here) and let EnsureCameraDynamicsCached re-resolve once.
+            _p1CameraZoom = null;
+            _p1CameraZoomCached = false;
+            _p1CameraMouseLookCached = false;
+            _p1FollowCached = false;
+
             if (_enabled != null && !_enabled.Value)
                 yield break;
 
@@ -1055,6 +1097,134 @@ namespace AWJSplitScreen
                 if (_p2WebManager != null)
                     _p2WebManager.DriveInput();
             }
+        }
+
+        // --- Debug_SpeedLog: clean horizontal ground-speed measurement ---
+        // rb.linearVelocity is a bad proxy for walk speed (it includes moving-platform
+        // velocity and vertical bob, and is sampled at render rate). Instead we integrate
+        // each spider's horizontal displacement at physics rate and report the true
+        // per-second ground speed for P1 vs P2. Test on flat, static ground.
+        private Vector3 _p1PrevPos, _p2PrevPos;
+        private bool _speedSampleInit;
+        private float _p1AccumDist, _p2AccumDist, _speedAccumTime;
+
+        public override void OnFixedUpdate()
+        {
+            if (!DebugSpeedLog || _enabled == null || !_enabled.Value || _p2Spider == null)
+            {
+                _speedSampleInit = false;
+                return;
+            }
+
+            var p1 = P1BodyMovementInstance;
+            var p2 = P2BodyMovementInstance != null ? P2BodyMovementInstance : _p2BodyMovement;
+            if (p1 == null || p2 == null)
+            {
+                _speedSampleInit = false;
+                return;
+            }
+
+            Vector3 p1Pos = p1.transform.position;
+            Vector3 p2Pos = p2.transform.position;
+
+            if (_speedSampleInit)
+            {
+                _p1AccumDist += Vector3.ProjectOnPlane(p1Pos - _p1PrevPos, Vector3.up).magnitude;
+                _p2AccumDist += Vector3.ProjectOnPlane(p2Pos - _p2PrevPos, Vector3.up).magnitude;
+                _speedAccumTime += Time.fixedDeltaTime;
+            }
+            _p1PrevPos = p1Pos;
+            _p2PrevPos = p2Pos;
+            _speedSampleInit = true;
+
+            if (_speedAccumTime >= 1f)
+            {
+                float p1Sp = _p1AccumDist / _speedAccumTime;
+                float p2Sp = _p2AccumDist / _speedAccumTime;
+                float ratio = p1Sp > 0.01f ? p2Sp / p1Sp : 0f;
+                LoggerInstance.Msg("[GroundSpeed/1s] P1=" + p1Sp.ToString("F2")
+                    + " P2=" + p2Sp.ToString("F2")
+                    + " ratio(P2/P1)=" + ratio.ToString("F2")
+                    + " | P1 " + DescribeBody(p1)
+                    + " | P2 " + DescribeBody(p2));
+                _p1AccumDist = 0f;
+                _p2AccumDist = 0f;
+                _speedAccumTime = 0f;
+            }
+        }
+
+        // Describes one BodyMovement's speed-relevant state for the diagnostic log
+        // (context alongside the displacement-based [GroundSpeed/1s] numbers). The `v`
+        // field is rb.linearVelocity.magnitude, which includes moving-platform velocity
+        // and vertical motion — trust [GroundSpeed/1s] for actual walk speed.
+        private string DescribeBody(Component bm)
+        {
+            if (bm == null) return "v=? mv=? sprint=? boost=? uw=? pot=? ms=? scale=?";
+            string v = "?", mv = "?", sprint = "?", boost = "?", uw = "?", pot = "?", ms = "?", scale = "?";
+            try
+            {
+                if (_bmRbProp != null)
+                {
+                    var rb = _bmRbProp.GetValue(bm, null) as Rigidbody;
+                    if (rb != null) v = rb.linearVelocity.magnitude.ToString("F2");
+                }
+            }
+            catch { }
+            try
+            {
+                if (BodyMove_MoveVectorField != null)
+                {
+                    var m = (Vector2)BodyMove_MoveVectorField.GetValue(bm);
+                    mv = "(" + m.x.ToString("F2") + "," + m.y.ToString("F2") + ")";
+                }
+            }
+            catch { }
+            try
+            {
+                if (BodyMove_IsSprintingField != null)
+                    sprint = ((bool)BodyMove_IsSprintingField.GetValue(bm)) ? "T" : "F";
+            }
+            catch { }
+            try
+            {
+                if (BodyMove_BoostFactorField != null)
+                    boost = ((float)BodyMove_BoostFactorField.GetValue(bm)).ToString("F2");
+            }
+            catch { }
+            try
+            {
+                // uw shows the effective underwater factor: 1.00 when dry, the game's
+                // movementUnderwaterFactor (default 0.5) when flagged underwater.
+                if (BodyMove_IsUnderwaterField != null)
+                {
+                    bool isUw = (bool)BodyMove_IsUnderwaterField.GetValue(bm);
+                    float uwFactor = 1f;
+                    if (isUw && BodyMove_UnderwaterFactorField != null)
+                        uwFactor = (float)BodyMove_UnderwaterFactorField.GetValue(bm);
+                    uw = uwFactor.ToString("F2");
+                }
+            }
+            catch { }
+            try
+            {
+                if (BodyMove_PotionMultField != null)
+                    pot = ((float)BodyMove_PotionMultField.GetValue(bm)).ToString("F2");
+            }
+            catch { }
+            try
+            {
+                if (BodyMove_MovementSpeedField != null)
+                    ms = ((float)BodyMove_MovementSpeedField.GetValue(bm)).ToString("F2");
+            }
+            catch { }
+            try
+            {
+                var s = bm.transform.lossyScale;
+                scale = s.x.ToString("F2") + "/" + s.y.ToString("F2");
+            }
+            catch { }
+            return "v=" + v + " mv=" + mv + " sprint=" + sprint + " boost=" + boost
+                + " uw=" + uw + " pot=" + pot + " ms=" + ms + " scale=" + scale;
         }
 
         public override void OnLateUpdate()
@@ -1489,13 +1659,124 @@ namespace AWJSplitScreen
             if (_p2BodyMovement == null)
                 return;
 
+            P2SprintDesired = !P2SprintDesired;
+            LoggerInstance.Msg("[P2Sprint] Sprint " + (P2SprintDesired ? "ON" : "OFF"));
+
+            // If the branch-aware writer in FixedUpdate_Prefix can't run (missing
+            // reflection targets), fall back to the legacy single pulse. The game's
+            // toggle branch consumes it; the Hold+KB/M branch latches it (old bug),
+            // but that's no worse than the previous behavior.
+            bool managed = BodyMove_IsSprintingField != null && TryGetSprintBranch(out _);
+            if (!managed)
+            {
+                try
+                {
+                    BodyMove_SprintInputField.SetValue(_p2BodyMovement, true);
+                }
+                catch (Exception ex)
+                {
+                    LoggerInstance.Warning("[P2Sprint] Failed to toggle sprint (non-fatal): " + ex.Message);
+                }
+            }
+        }
+
+        // Determines which sprint branch BodyMovement.PerformWalking will take
+        // (ilspy BodyMovement.cs:739): Hold+KeyboardMouse copies sprintInput into
+        // isSprinting every step; otherwise sprintInput acts as a consume-once toggle.
+        // Values are read fresh every call (device/mode can change mid-session);
+        // only the reflection handles are cached.
+        private static PropertyInfo _sprintModeProp;
+        private static object _sprintModeHoldValue;
+        private static PropertyInfo _gcInstanceProp;
+        private static PropertyInfo _gcInputIsKbmProp;
+        private static bool _sprintBranchReflectionSearched;
+
+        internal static bool TryGetSprintBranch(out bool holdKbm)
+        {
+            holdKbm = false;
             try
             {
-                BodyMove_SprintInputField.SetValue(_p2BodyMovement, true);
+                if (!_sprintBranchReflectionSearched)
+                {
+                    _sprintBranchReflectionSearched = true;
+                    var sct = AccessTools.TypeByName("_Scripts.Singletons.SettingsController");
+                    if (sct != null)
+                    {
+                        _sprintModeProp = sct.GetProperty("SprintMode",
+                            BindingFlags.Static | BindingFlags.Public | BindingFlags.FlattenHierarchy);
+                        if (_sprintModeProp != null)
+                            try { _sprintModeHoldValue = Enum.Parse(_sprintModeProp.PropertyType, "Hold"); } catch { }
+                    }
+                    var gct = AccessTools.TypeByName("_Scripts.Singletons.GameController");
+                    if (gct != null)
+                    {
+                        _gcInstanceProp = gct.GetProperty("Instance",
+                            BindingFlags.Static | BindingFlags.Public | BindingFlags.FlattenHierarchy);
+                        _gcInputIsKbmProp = gct.GetProperty("InputIsKeyboardMouse",
+                            BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                    }
+                }
+
+                if (_sprintModeProp == null || _sprintModeHoldValue == null ||
+                    _gcInstanceProp == null || _gcInputIsKbmProp == null)
+                    return false;
+
+                var sprintMode = _sprintModeProp.GetValue(null, null);
+                if (sprintMode == null) return false;
+
+                var gc = _gcInstanceProp.GetValue(null, null);
+                if (gc == null) return false;
+
+                bool inputIsKbm = (bool)_gcInputIsKbmProp.GetValue(gc, null);
+                holdKbm = sprintMode.Equals(_sprintModeHoldValue) && inputIsKbm;
+                return true;
             }
-            catch (Exception ex)
+            catch
             {
-                LoggerInstance.Warning("[P2Sprint] Failed to toggle sprint (non-fatal): " + ex.Message);
+                return false;
+            }
+        }
+
+        // True only when the game is in normal gameplay (GameController.State == GameState.Running).
+        // Defaults to true (sync) when reflection is unavailable, preserving prior always-sync
+        // behavior. Used to keep P1's transient cutscene/dialogue/photo-mode FOV off P2's camera.
+        private static PropertyInfo _gcStateInstanceProp;
+        private static PropertyInfo _gcStateProp;
+        private static object _gameStateRunningValue;
+        private static bool _gcStateReflectionSearched;
+
+        private static bool IsGameplayRunning()
+        {
+            try
+            {
+                if (!_gcStateReflectionSearched)
+                {
+                    _gcStateReflectionSearched = true;
+                    var gct = AccessTools.TypeByName("_Scripts.Singletons.GameController");
+                    if (gct != null)
+                    {
+                        _gcStateInstanceProp = gct.GetProperty("Instance",
+                            BindingFlags.Static | BindingFlags.Public | BindingFlags.FlattenHierarchy);
+                        _gcStateProp = gct.GetProperty("State",
+                            BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                        var gsType = gct.GetNestedType("GameState", BindingFlags.Public);
+                        if (gsType != null)
+                            try { _gameStateRunningValue = Enum.Parse(gsType, "Running"); } catch { }
+                    }
+                }
+
+                if (_gcStateInstanceProp == null || _gcStateProp == null || _gameStateRunningValue == null)
+                    return true; // reflection unavailable -> preserve always-sync behavior
+
+                var gc = _gcStateInstanceProp.GetValue(null, null);
+                if (gc == null) return true;
+
+                var state = _gcStateProp.GetValue(gc, null);
+                return state != null && state.Equals(_gameStateRunningValue);
+            }
+            catch
+            {
+                return true;
             }
         }
 
@@ -1690,6 +1971,18 @@ namespace AWJSplitScreen
                 InitP2CameraRig();
 
             EnsureCameraDynamicsCached();
+
+            // Keep P2's FOV in lockstep with P1's settings-driven gameplay FOV. The game
+            // recomputes P1's FOV live from settings/aspect (CameraController.UpdateFieldOfView);
+            // P2's clone only inherited the value once at Instantiate. Only sync while the game
+            // is in normal gameplay (GameState.Running) — otherwise P1's output camera carries a
+            // transient cutscene/dialogue/photo-mode vcam FOV that we don't want on P2's half.
+            if (_camLeftOrTop != null && !_camLeftOrTop.orthographic
+                && IsGameplayRunning()
+                && !Mathf.Approximately(_camRightOrBottom.fieldOfView, _camLeftOrTop.fieldOfView))
+            {
+                _camRightOrBottom.fieldOfView = _camLeftOrTop.fieldOfView;
+            }
 
             var prePos = _camRightOrBottom.transform.position;
 
@@ -2401,8 +2694,10 @@ namespace AWJSplitScreen
             _bmStateProp = null;
             _bmWebTouchedProp = null;
             _bmWalkingState = null;
-            // Note: _p1CameraZoom + _p1CameraZoomCached deliberately NOT reset — those
-            // settings come from a P1 component that survives across F9 toggles.
+            // Note: the P1 camera caches (_p1CameraZoom / _p1FollowCached / _p1CameraMouseLookCached)
+            // are NOT reset here — Teardown runs first and its _p2ManualZoom clamp below relies on the
+            // retained _p1MinZoom/_p1MaxZoom. DeferredSetup invalidates those caches immediately after
+            // calling Teardown so a scene reload re-resolves them against the new P1 components.
 
             P2InputTransform = null;
             P2Camera = null;
@@ -2410,6 +2705,7 @@ namespace AWJSplitScreen
             P2ShootHeld = false;
             P2JumpPressed = false;
             P1JumpPressed = false;
+            P2SprintDesired = false;
             P2WebActive = false;
             P2WebTargetActive = false;
             BodyMovementUnderwaterPatches.Reset();
@@ -4910,6 +5206,33 @@ namespace AWJSplitScreen
         {
             if (IsP2(__instance))
             {
+                // Hold P2's sprint state authoritatively each physics step. The game's
+                // sprint handling (ilspy BodyMovement.cs:739-747) runs in PerformWalking
+                // right after this prefix: the Hold+KB/M branch copies sprintInput into
+                // isSprinting (so we write the desired state every step), while the
+                // toggle branch flips isSprinting once per sprintInput=true (so we pulse
+                // only on mismatch — converges in one step, no oscillation).
+                bool holdKbm;
+                if (SplitScreenMod.BodyMove_SprintInputField != null &&
+                    SplitScreenMod.BodyMove_IsSprintingField != null &&
+                    SplitScreenMod.TryGetSprintBranch(out holdKbm))
+                {
+                    bool desired = SplitScreenMod.P2SprintDesired;
+                    try
+                    {
+                        if (holdKbm)
+                        {
+                            SplitScreenMod.BodyMove_SprintInputField.SetValue(__instance, desired);
+                        }
+                        else
+                        {
+                            bool sprinting = (bool)SplitScreenMod.BodyMove_IsSprintingField.GetValue(__instance);
+                            SplitScreenMod.BodyMove_SprintInputField.SetValue(__instance, sprinting != desired);
+                        }
+                    }
+                    catch { }
+                }
+
                 // Consume the jump flag — guard against mid-air jumps
                 if (SplitScreenMod.P2JumpPressed)
                 {

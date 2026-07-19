@@ -22,6 +22,10 @@ Preferences in:
 Key settings:
 - `P2_GamepadIndex` (default 1 = second pad)
 - `FilterP1FromP2Gamepad` (default true)
+- `P2_CameraDistance` (default 14, near P1's typical distance)
+- `Debug_SpeedLog` (default false; when true, logs P1/P2 average horizontal ground speed per second plus move vector and sprint state — for verifying both players cover the same distance. Test on flat, static ground: standing on moving surfaces inflates the numbers.)
+
+Note on sprint: P2's Left Stick Click now reliably toggles sprint ON and OFF in every game input mode (it previously latched on), and note the game itself latches P1's sprint as a toggle on gamepad — the speed log shows both sprint states if you need to check.
 
 ## Installation:
 Download the latest Melon Loader installer here: https://melonloader.co/download.html. Note that Melon Loader's website currently only shows 7.0. The installer will update when opened. Once you have downloaded the Melon Loader installer open it and select A Webbing Journey. Make sure you have it set to install version 7.2. Then download the latest release of this mod, un-zip it and copy the DLL into `A Webbing Journey\Mods\`.
