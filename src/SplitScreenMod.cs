@@ -49,6 +49,7 @@ namespace AWJSplitScreen
         internal static FieldInfo BodyMove_IsUnderwaterField;
         internal static FieldInfo BodyMove_UnderwaterFactorField;
         internal static FieldInfo BodyMove_PotionMultField;
+        internal static FieldInfo BodyMove_TargetTransformField;
         internal static MethodInfo BodyMove_InitializeJumpMethod;
 
         private const string Cat = "AWJ_SplitScreen";
@@ -340,6 +341,7 @@ namespace AWJSplitScreen
                     BodyMove_IsUnderwaterField = FindFieldByName(bodyMoveType, "isUnderwater");
                     BodyMove_UnderwaterFactorField = FindFieldByName(bodyMoveType, "movementUnderwaterFactor");
                     BodyMove_PotionMultField = FindFieldByName(bodyMoveType, "currentAncientPotionSpeedMultiplier");
+                    BodyMove_TargetTransformField = FindFieldByName(bodyMoveType, "targetTransform");
                     BodyMove_InitializeJumpMethod = bodyMoveType.GetMethod("InitializeJump",
                         BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
 
@@ -1159,14 +1161,38 @@ namespace AWJSplitScreen
         // and vertical motion — trust [GroundSpeed/1s] for actual walk speed.
         private string DescribeBody(Component bm)
         {
-            if (bm == null) return "v=? mv=? sprint=? boost=? uw=? pot=? ms=? scale=?";
-            string v = "?", mv = "?", sprint = "?", boost = "?", uw = "?", pot = "?", ms = "?", scale = "?";
+            if (bm == null) return "v=? velUp=? mv=? tgt=? sprint=? boost=? uw=? pot=? ms=? scale=?";
+            string v = "?", velUp = "?", mv = "?", tgt = "?", sprint = "?", boost = "?", uw = "?", pot = "?", ms = "?", scale = "?";
             try
             {
                 if (_bmRbProp != null)
                 {
                     var rb = _bmRbProp.GetValue(bm, null) as Rigidbody;
-                    if (rb != null) v = rb.linearVelocity.magnitude.ToString("F2");
+                    if (rb != null)
+                    {
+                        var vel = rb.linearVelocity;
+                        v = vel.magnitude.ToString("F2");
+                        // Component of velocity along the body's up axis. If P2's velocity
+                        // points into the ground (large negative velUp) while P1's is ~0,
+                        // that's the wasted downward angle stealing horizontal speed.
+                        velUp = Vector3.Dot(vel, bm.transform.up).ToString("F2");
+                    }
+                }
+            }
+            catch { }
+            try
+            {
+                // Ground target position in body-local space. tgtY = ride offset (how far
+                // the target sits below the body); tgtZ = fore/aft (negative = target is
+                // BEHIND the body). Either being off vs P1 explains the down/back velocity.
+                if (BodyMove_TargetTransformField != null)
+                {
+                    var tt = BodyMove_TargetTransformField.GetValue(bm) as Transform;
+                    if (tt != null)
+                    {
+                        var local = bm.transform.InverseTransformPoint(tt.position);
+                        tgt = "(y" + local.y.ToString("F2") + ",z" + local.z.ToString("F2") + ")";
+                    }
                 }
             }
             catch { }
@@ -1223,7 +1249,8 @@ namespace AWJSplitScreen
                 scale = s.x.ToString("F2") + "/" + s.y.ToString("F2");
             }
             catch { }
-            return "v=" + v + " mv=" + mv + " sprint=" + sprint + " boost=" + boost
+            return "v=" + v + " velUp=" + velUp + " mv=" + mv + " tgt=" + tgt
+                + " sprint=" + sprint + " boost=" + boost
                 + " uw=" + uw + " pot=" + pot + " ms=" + ms + " scale=" + scale;
         }
 
@@ -1544,6 +1571,42 @@ namespace AWJSplitScreen
             catch (Exception ex)
             {
                 LoggerInstance.Warning("Failed to set P2 layers (non-fatal): " + ex);
+            }
+
+            // Speed-parity fix. Moving P2 to layer 2 (above) also turned ON physical
+            // collision between P2's body and the walkable ground (the original spider
+            // layer is excluded from ground collision in the project's collision matrix;
+            // layer 2 is not). That collision held P2's body ~0.1 above where its scripted
+            // velocity wants it and made it bounce vertically, wasting ~27% of its forward
+            // speed (measured: velUp oscillated ±3.7, ratio 0.73). P1's body never
+            // physically collides with what it walks on — it's positioned purely by script.
+            // Match that by excluding the walkable-ground layers from P2's colliders so the
+            // body settles flush (velUp≈0). Layer 2 still hides P2 from P1's leg raycasts.
+            try
+            {
+                LayerMask groundMask = GetP2WhatIsGround();
+                if (groundMask.value != 0)
+                {
+                    var p2Colliders = _p2Spider.GetComponentsInChildren<Collider>(true);
+                    int excluded = 0;
+                    for (int i = 0; i < p2Colliders.Length; i++)
+                    {
+                        var c = p2Colliders[i];
+                        if (c == null) continue;
+                        c.excludeLayers = c.excludeLayers | groundMask;
+                        excluded++;
+                    }
+                    LoggerInstance.Msg("Excluded ground layers (" + groundMask.value + ") from " + excluded
+                        + " P2 collider(s) so the body sits flush like P1 (speed-parity fix).");
+                }
+                else
+                {
+                    LoggerInstance.Warning("Could not resolve whatIsGround for the P2 ground-collision fix; P2 may walk slower than P1.");
+                }
+            }
+            catch (Exception ex)
+            {
+                LoggerInstance.Warning("P2 ground-collision exclusion failed (non-fatal): " + ex);
             }
 
             DestroyComponentByTypeName(_p2Spider, "_Scripts.General.DontDestroyMe");
@@ -2489,6 +2552,34 @@ namespace AWJSplitScreen
             if (angle > 180f) angle -= 360f;
             if (angle < -180f) angle += 360f;
             return angle;
+        }
+
+        // Reads P2's BodyMovement ground layer mask (the surfaces the spider walks on)
+        // for the ground-collision-exclusion speed fix. Falls back to whatIsGroundDefault.
+        private LayerMask GetP2WhatIsGround()
+        {
+            try
+            {
+                var bmType = AccessTools.TypeByName("_Scripts.Spider.BodyMovement");
+                if (bmType == null || _p2Spider == null) return default;
+                var bm = _p2Spider.GetComponentInChildren(bmType, true) as Component;
+                if (bm == null) return default;
+
+                const BindingFlags F = BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public;
+                foreach (var name in new[] { "whatIsGround", "whatIsGroundDefault" })
+                {
+                    var f = bmType.GetField(name, F);
+                    if (f == null) continue;
+                    try
+                    {
+                        var v = (LayerMask)f.GetValue(bm);
+                        if (v.value != 0) return v;
+                    }
+                    catch { }
+                }
+            }
+            catch { }
+            return default;
         }
 
         private static GameObject FindPlayerSpider()
