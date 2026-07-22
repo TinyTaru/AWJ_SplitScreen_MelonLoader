@@ -4626,6 +4626,18 @@ namespace AWJSplitScreen
             catch { return false; }
         }
 
+        private bool IsBodySprinting()
+        {
+            try
+            {
+                var f = SplitScreenMod.BodyMove_IsSprintingField;
+                if (f != null && _bodyMovement != null)
+                    return (bool)f.GetValue(_bodyMovement);
+            }
+            catch { }
+            return false;
+        }
+
         private bool _wasJumping;
 
         private void Update()
@@ -4689,7 +4701,12 @@ namespace AWJSplitScreen
                 var pos = Vector3.Lerp(_oldTarget, _targetLocal.position, _lerp);
                 pos += _target.up * Mathf.Sin(_lerp * Mathf.PI) * _stepHeight * _scale;
                 _target.position = pos;
-                _lerp += dt / (_stepTime * _scale);
+                // Mirror MasterLegController.StepTime (ilspy MasterLegController.cs:71-79):
+                // stepping is twice as fast while the body is sprinting. Without this,
+                // P2's legs stay at the walking cadence and visibly drag behind the
+                // faster body when sprinting.
+                float stepTime = IsBodySprinting() ? _stepTime * 0.5f : _stepTime;
+                _lerp += dt / (stepTime * _scale);
             }
             else
             {
