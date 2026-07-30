@@ -1,6 +1,7 @@
 # AWJ Split Screen + P2 Inject (v0.2.2)
 
 ## Important Hotkeys:
+F7  - Dump all task/quest states to the log (diagnostic).
 F8  - Swap which controller controls which player.
 F9  - Toggle multiplayer.
 F10 - Flip between horizontal and vertical.

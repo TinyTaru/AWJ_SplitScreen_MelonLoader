@@ -221,7 +221,7 @@ namespace AWJSplitScreen
 
             LoggerInstance.Msg("AWJ Split Screen + P2 Inject v0.2.2 loaded.");
             LoggerInstance.Msg("F8 swap controllers, F9 split, F10 orientation | P2 Move: IJKL or Gamepad LStick | P2 Sprint: LStick click (toggles on/off in all modes) | P2 Look: N/M or RStickX | P2 Zoom: RStick press | P2 Jump: A | P2 Interact: H/X | P2 Web: RT shoot/release, LT quick build, LB fixed anchor, RB moving anchor, B delete/cancel.");
-            LoggerInstance.Msg("Diagnostics: set Debug_SpeedLog=true in MelonPreferences.cfg to log P1/P2 speed, sprint and camera distance once per second.");
+            LoggerInstance.Msg("Diagnostics: set Debug_SpeedLog=true in MelonPreferences.cfg to log P1/P2 speed, sprint and camera distance once per second. Press F7 to dump all task/quest states.");
             LoggerInstance.Msg("Tip: If both controllers still move P1, ensure FilterP1FromP2Gamepad=true and P2_GamepadIndex is the second pad (usually 1).");
         }
 
@@ -1072,6 +1072,9 @@ namespace AWJSplitScreen
             if (InputCompat.Down_F8())
                 ToggleControllerAssignments();
 
+            if (InputCompat.Down_F7())
+                DumpQuestStates();
+
             if (_enabled.Value)
             {
                 if (InputCompat.IsP2JumpPressedNow(P2UseGamepad, P2GamepadIndex))
@@ -1098,6 +1101,117 @@ namespace AWJSplitScreen
                 // Drive P2's independent web system
                 if (_p2WebManager != null)
                     _p2WebManager.DriveInput();
+            }
+        }
+
+        // F7 diagnostic: dump every task list's tasks with their live PixelCrushers
+        // QuestState. The game's web-based quest triggers (WebJointTrigger /
+        // WebThreadTrigger) early-out unless their quest is Active, so a task sitting
+        // at Unassigned silently ignores every web the player builds. Read-only.
+        private void DumpQuestStates()
+        {
+            try
+            {
+                var qcType = AccessTools.TypeByName("_Scripts.Singletons.QuestController");
+                if (qcType == null)
+                {
+                    LoggerInstance.Warning("[QuestDump] QuestController type not found.");
+                    return;
+                }
+
+                var instProp = qcType.GetProperty("Instance",
+                    BindingFlags.Static | BindingFlags.Public | BindingFlags.FlattenHierarchy);
+                var qc = instProp != null ? instProp.GetValue(null, null) : null;
+                if (qc == null)
+                {
+                    var found = UnityEngine.Object.FindObjectsOfType(qcType, true);
+                    if (found != null && found.Length > 0) qc = found[0];
+                }
+                if (qc == null)
+                {
+                    LoggerInstance.Warning("[QuestDump] No QuestController instance in this scene.");
+                    return;
+                }
+
+                // QuestLog.GetQuestState(string) -> QuestState (PixelCrushers Dialogue System)
+                var questLogType = AccessTools.TypeByName("PixelCrushers.DialogueSystem.QuestLog");
+                var getState = questLogType != null
+                    ? questLogType.GetMethod("GetQuestState", BindingFlags.Static | BindingFlags.Public,
+                        null, new Type[] { typeof(string) }, null)
+                    : null;
+                if (getState == null)
+                    LoggerInstance.Warning("[QuestDump] QuestLog.GetQuestState not found — states will show as '?'.");
+
+                const BindingFlags F = BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public;
+                var listNames = new[] { "taskListKitchen", "taskListOffice", "taskListKidsRoom", "taskListLivingRoom" };
+
+                LoggerInstance.Msg("===== [QuestDump] task states =====");
+                foreach (var listName in listNames)
+                {
+                    object taskList = null;
+                    try
+                    {
+                        var lf = qcType.GetField(listName, F);
+                        if (lf != null) taskList = lf.GetValue(qc);
+                    }
+                    catch { }
+
+                    if (taskList == null)
+                    {
+                        LoggerInstance.Msg("  " + listName + ": (not set)");
+                        continue;
+                    }
+
+                    Array tasks = null;
+                    try
+                    {
+                        var tf = taskList.GetType().GetField("tasks", F);
+                        if (tf != null) tasks = tf.GetValue(taskList) as Array;
+                    }
+                    catch { }
+
+                    if (tasks == null || tasks.Length == 0)
+                    {
+                        LoggerInstance.Msg("  " + listName + ": (no tasks)");
+                        continue;
+                    }
+
+                    LoggerInstance.Msg("  " + listName + " (" + tasks.Length + " tasks):");
+                    for (int i = 0; i < tasks.Length; i++)
+                    {
+                        var task = tasks.GetValue(i);
+                        if (task == null) { LoggerInstance.Msg("    [" + i + "] (null)"); continue; }
+
+                        string questName = "?", text = "?", state = "?";
+                        try
+                        {
+                            var tt = task.GetType();
+                            var qnF = tt.GetField("questName", F);
+                            if (qnF != null) questName = (qnF.GetValue(task) as string) ?? "";
+                            var txtF = tt.GetField("text", F);
+                            if (txtF != null) text = (txtF.GetValue(task) as string) ?? "";
+                        }
+                        catch { }
+
+                        try
+                        {
+                            if (getState != null && !string.IsNullOrEmpty(questName) && questName != "?")
+                            {
+                                var s = getState.Invoke(null, new object[] { questName });
+                                state = s != null ? s.ToString() : "null";
+                            }
+                        }
+                        catch (Exception ex) { state = "err:" + ex.Message; }
+
+                        LoggerInstance.Msg("    [" + i + "] state=" + state
+                            + " | quest=\"" + questName + "\" | text=\"" + text + "\"");
+                    }
+                }
+                LoggerInstance.Msg("===== [QuestDump] end =====");
+            }
+            catch (Exception ex)
+            {
+                LoggerInstance.Warning("[QuestDump] failed: " + ex);
             }
         }
 
@@ -2918,6 +3032,17 @@ namespace AWJSplitScreen
         private const float P2_DELETE_HOLD_DURATION = 1f;
         private MethodInfo _mDestroyAllPlayerWebs;
 
+        // Cached members for the per-physics-step spring-joint anchor tick (FixedUpdate).
+        private PropertyInfo _bmTargetRigidbodyProp;
+        private bool _bmTargetRigidbodyPropCached;
+        private PropertyInfo _moUseComAsWebAnchorProp;
+        private Type _moUseComAsWebAnchorType;
+        private Type _movableObjectType;
+        private bool _movableObjectTypeCached;
+        private Rigidbody _comAnchorCachedRb;
+        private bool _comAnchorCachedValue;
+        private SpringJoint _loggedAnchorTickJoint;
+
         private bool _inited;
         private MelonLogger.Instance _logger;
         private float _nextDebugLog;
@@ -4118,6 +4243,109 @@ namespace AWJSplitScreen
             }
         }
 
+        private void FixedUpdate()
+        {
+            TickSpringJointAnchor();
+        }
+
+        // Mirror of WebController.UpdateSpringJointAnchor for P2.
+        //
+        // When the spider webs a movable object while standing on ANOTHER movable body
+        // (e.g. a sliding-puzzle tile while standing on the puzzle board), the game
+        // connects the SpringJoint to that body rather than to the spider, and then
+        // rewrites springJoint.connectedAnchor every physics step to the spider's
+        // current position in that body's local space. That per-step rewrite is what
+        // makes the webbed object follow the player.
+        //
+        // WebController.FixedUpdate only ever runs against the live (P1) state, so for
+        // P2 the anchor kept the Vector3.zero it was given at attach time — the local
+        // origin of the board — and every tile P2 grabbed was dragged toward the board's
+        // pivot instead of toward P2. Tick it here from P2's own capsule.
+        private void TickSpringJointAnchor()
+        {
+            if (!_inited || _p2Capsule == null || !_p2Capsule.webActive || _p2BodyMovement == null) return;
+            if (!(_p2Capsule.springJoint is SpringJoint sj) || sj == null) return;
+
+            try
+            {
+                var connected = sj.connectedBody;
+                if (connected == null) return;
+
+                // Only when the joint is connected to the body P2 is standing on;
+                // a joint connected to P2's own rigidbody needs no anchor update.
+                var targetRb = GetP2TargetRigidbody();
+                if (targetRb == null || connected != targetRb) return;
+
+                Vector3 anchor = connected.transform.InverseTransformPoint(_p2BodyMovement.transform.position);
+                sj.connectedAnchor = UsesCenterOfMassAsWebAnchor(targetRb)
+                    ? targetRb.centerOfMass + new Vector3(anchor.x, 0f, anchor.z)
+                    : anchor;
+
+                if (!ReferenceEquals(sj, _loggedAnchorTickJoint))
+                {
+                    _loggedAnchorTickJoint = sj;
+                    if (_logger != null)
+                        _logger.Msg("[P2WebManager] Driving spring anchor for P2's web on '" + sj.name
+                            + "' (connected to '" + connected.name + "' that P2 is standing on).");
+                }
+            }
+            catch { }
+        }
+
+        private Rigidbody GetP2TargetRigidbody()
+        {
+            if (_p2BodyMovement == null) return null;
+            if (!_bmTargetRigidbodyPropCached)
+            {
+                _bmTargetRigidbodyPropCached = true;
+                try
+                {
+                    _bmTargetRigidbodyProp = _p2BodyMovement.GetType().GetProperty("TargetRigidbody",
+                        BindingFlags.Instance | BindingFlags.Public);
+                }
+                catch { }
+                if (_bmTargetRigidbodyProp == null && _logger != null)
+                    _logger.Warning("[P2WebManager] BodyMovement.TargetRigidbody not found — P2 can't drag webbed objects while standing on a movable body.");
+            }
+            if (_bmTargetRigidbodyProp == null) return null;
+            try { return _bmTargetRigidbodyProp.GetValue(_p2BodyMovement, null) as Rigidbody; }
+            catch { return null; }
+        }
+
+        // Memoized per rigidbody: this is polled every physics step while P2 drags, and
+        // the answer is a serialized flag on the object, so it can't change under us.
+        private bool UsesCenterOfMassAsWebAnchor(Rigidbody rb)
+        {
+            if (rb == null) return false;
+            if (ReferenceEquals(rb, _comAnchorCachedRb)) return _comAnchorCachedValue;
+
+            _comAnchorCachedRb = rb;
+            _comAnchorCachedValue = false;
+            try
+            {
+                if (!_movableObjectTypeCached)
+                {
+                    _movableObjectTypeCached = true;
+                    try { _movableObjectType = AccessTools.TypeByName("_Scripts.Objects.MovableObject"); } catch { }
+                }
+                if (_movableObjectType == null) return false;
+
+                var movable = rb.GetComponent(_movableObjectType);
+                if (movable == null) return false;
+
+                if (!ReferenceEquals(_moUseComAsWebAnchorType, movable.GetType()))
+                {
+                    _moUseComAsWebAnchorType = movable.GetType();
+                    _moUseComAsWebAnchorProp = _moUseComAsWebAnchorType.GetProperty("UseCenterOfMassAsWebAnchor",
+                        BindingFlags.Instance | BindingFlags.Public);
+                }
+                if (_moUseComAsWebAnchorProp == null) return false;
+                _comAnchorCachedValue = (bool)_moUseComAsWebAnchorProp.GetValue(movable, null);
+            }
+            catch { _comAnchorCachedValue = false; }
+            return _comAnchorCachedValue;
+        }
+
         private void UpdateTargetDot(bool show)
         {
             if (_p2TargetDot == null || _p2Camera == null) return;
@@ -4429,6 +4657,8 @@ namespace AWJSplitScreen
             _p2InputTransform = null;
             _p2Rigidbody = null;
             _p2BodyMovementBallProp = null;
+            _comAnchorCachedRb = null;
+            _loggedAnchorTickJoint = null;
             SplitScreenMod.P2WebActive = false;
             SplitScreenMod.P2WebTargetActive = false;
             _inited = false;
@@ -6499,6 +6729,7 @@ namespace AWJSplitScreen
             catch { return false; }
         }
 
+        public static bool Down_F7() { return Down("f7Key", KeyCode.F7); }
         public static bool Down_F8() { return Down("f8Key", KeyCode.F8); }
         public static bool Down_F9() { return Down("f9Key", KeyCode.F9); }
         public static bool Down_F10() { return Down("f10Key", KeyCode.F10); }
