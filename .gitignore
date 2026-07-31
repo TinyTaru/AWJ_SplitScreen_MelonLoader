@@ -28,3 +28,6 @@ Desktop.ini
 
 # Game DLLs (local references - not for source control)
 lib/
+
+# Decompiled game source (ilspy dump) - copyrighted game code, not for a public repo
+ilspy_WebController/
