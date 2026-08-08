@@ -31,16 +31,16 @@ Key settings:
 Note on sprint: P2's Left Stick Click now reliably toggles sprint ON and OFF in every game input mode (it previously latched on), and note the game itself latches P1's sprint as a toggle on gamepad — the speed log shows both sprint states if you need to check.
 
 ## Installation:
-1. Download the Melon Loader installer. [Windows Download](https://github.com/LavaGang/MelonLoader/releases/download/v0.7.2/MelonLoader.Installer.exe) [macOS download](https://github.com/LavaGang/MelonLoader/releases/download/v0.7.2/MelonLoader.macOS.x64.zip). MacOS in untested and may not work.
+1. Download the MelonLoader installer. [Windows Download](https://github.com/LavaGang/MelonLoader/releases/download/v0.7.2/MelonLoader.Installer.exe) [macOS download](https://github.com/LavaGang/MelonLoader/releases/download/v0.7.3/MelonLoader.macOS.x64.zip). MacOS is currently untested and may not work. The rest of the guide is intended to be followed on Windows. A macOS guide may come later.
 
 2. Open the installer and select A Webbing Journey. Make sure you have it set to install version 7.2.
 <img width="502" height="732" alt="image" src="https://github.com/user-attachments/assets/d106bea7-9edb-40f2-aa3f-f32f89a249b8" />
 
-3. Download the latest release of the mod [here](https://github.com/TinyTaru/AWJ_SplitScreen_MelonLoader/releases/download/latest/AWJ_SplitScreen.zip).
+3. Download the latest release of the mod [here](https://github.com/TinyTaru/AWJ_SplitScreen_MelonLoader/releases/latest/download/AWJ_SplitScreen.zip).
 4. Go to steam and click on A Webbing Journey in your library and then the gear on the right. Select `Browse local files`.
 <img width="647" height="586" alt="image" src="https://github.com/user-attachments/assets/d99195bb-b41c-483b-8331-cb7ac59891ed" />
 
-5. Un-zip the file you downloaded and copy the DLL file into the mods folder of the game that Melon Loader added.
+5. Un-zip the file you downloaded and copy the DLL file into the mods folder of the game that MelonLoader added.
 <img width="1018" height="630" alt="image" src="https://github.com/user-attachments/assets/9b53c380-4f15-4cc2-a7c6-093e1759c064" />
 
 6. Launch the game as you normally would and once you're in level press F9 to start multiplayer. Make sure you have two controllers plugged in.
