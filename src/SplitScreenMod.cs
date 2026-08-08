@@ -213,6 +213,9 @@ namespace AWJSplitScreen
 
             InputCompat.Init(LoggerInstance);
             InstallHarmonyPatches();
+            AWJSplitScreenUpdateFix.UpdateFixMod.Initialize(
+                message => LoggerInstance.Msg(message),
+                message => LoggerInstance.Error(message));
 
             SceneManager.sceneLoaded += (_, __) => MelonCoroutines.Start(DeferredSetup());
 
@@ -316,6 +319,7 @@ namespace AWJSplitScreen
 
         public override void OnDeinitializeMelon()
         {
+            AWJSplitScreenUpdateFix.UpdateFixMod.Deinitialize();
         }
 
         private void InstallHarmonyPatches()
@@ -1102,6 +1106,8 @@ namespace AWJSplitScreen
                 if (_p2WebManager != null)
                     _p2WebManager.DriveInput();
             }
+
+            AWJSplitScreenUpdateFix.UpdateFixMod.Update();
         }
 
         // F7 diagnostic: dump every task list's tasks with their live PixelCrushers
@@ -1374,6 +1380,7 @@ namespace AWJSplitScreen
                 return;
 
             UpdateP2CameraLook();
+            AWJSplitScreenUpdateFix.UpdateFixMod.LateUpdate();
         }
 
 
