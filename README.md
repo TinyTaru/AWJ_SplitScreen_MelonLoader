@@ -1,4 +1,6 @@
-# AWJ Split Screen + P2 Inject (v0.2.2)
+# AWJ Split Screen + P2 Inject (v0.6.5)
+
+## Warning this mod is in beta. Expect bugs.
 
 ## Important Hotkeys:
 F7  - Dump all task/quest states to the log (diagnostic).
