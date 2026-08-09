@@ -41,6 +41,7 @@ namespace AWJSplitScreenUpdateFix
         private static FieldInfo p2InputTransformField;
         private static Type cameraControllerType;
         private static FieldInfo cameraInputTransformField;
+        private static FieldInfo cameraLookInputField;
         private static Type carpetType;
         private static FieldInfo carpetWorldReferenceSizeField;
         private static FieldInfo carpetFullFluffScreenSizeField;
@@ -48,10 +49,12 @@ namespace AWJSplitScreenUpdateFix
         private static Type windParticleSystemType;
         private static FieldInfo windDeactivateThresholdField;
         private static FieldInfo windActivateThresholdField;
+        private static FieldInfo windMaxVelocityField;
         private static Type splitScreenType;
         private static FieldInfo p2UseGamepadField;
         private static FieldInfo p2GamepadIndexField;
         private static FieldInfo p2DeadzoneField;
+        private static FieldInfo debugSpeedLogField;
         private static Type inputCompatType;
         private static MethodInfo inputIsCallbackFromP2Method;
         private static MethodInfo inputGetP2RightStickMethod;
@@ -121,6 +124,7 @@ namespace AWJSplitScreenUpdateFix
             {
                 windDeactivateThresholdField = windParticleSystemType.GetField("windDeactivateThreshold", flags);
                 windActivateThresholdField = windParticleSystemType.GetField("windActivateThreshold", flags);
+                windMaxVelocityField = windParticleSystemType.GetField("maxWindVelocity", flags);
             }
 
             simpleShellType = AccessTools.TypeByName("SimpleShell");
@@ -179,6 +183,7 @@ namespace AWJSplitScreenUpdateFix
                 p2UseGamepadField = splitScreenType.GetField("P2UseGamepad", BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public);
                 p2GamepadIndexField = splitScreenType.GetField("P2GamepadIndex", BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public);
                 p2DeadzoneField = splitScreenType.GetField("P2Deadzone", BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public);
+                debugSpeedLogField = splitScreenType.GetField("DebugSpeedLog", BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public);
                 p2WebActiveField = splitScreenType.GetField("P2WebActive", BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public);
                 inputCompatType = AccessTools.TypeByName("AWJSplitScreen.InputCompat");
                 if (inputCompatType != null)
@@ -212,6 +217,7 @@ namespace AWJSplitScreenUpdateFix
                 postfix: new HarmonyMethod(typeof(UpdateFixMod), "BodyMovementUpdatePostfix"));
 
             Type cameraMouseLookType = AccessTools.TypeByName("_Scripts.Camera.CameraMouseLook");
+            cameraLookInputField = cameraMouseLookType == null ? null : cameraMouseLookType.GetField("lookInput", flags);
             MethodInfo cameraMouseLookOnLook = cameraMouseLookType == null ? null : AccessTools.Method(cameraMouseLookType, "OnLook");
             if (cameraMouseLookOnLook != null)
             {
@@ -244,8 +250,11 @@ namespace AWJSplitScreenUpdateFix
             EnsureP2MotionVisuals();
             EnsureP2WindTrail();
             UpdateP2ShellMaterialPosition();
-            LogP2FrameCadence();
-            LogSharedPhysicsState();
+            if (ReadStaticBool(debugSpeedLogField))
+            {
+                LogP2FrameCadence();
+                LogSharedPhysicsState();
+            }
         }
 
         internal static void LateUpdate()
@@ -256,11 +265,26 @@ namespace AWJSplitScreenUpdateFix
         internal static void Deinitialize()
         {
             RenderPipelineManager.beginCameraRendering -= OnBeginCameraRendering;
+            ResetP2VisualResources();
             if (p2AirInputProxy != null)
             {
                 UnityEngine.Object.Destroy(p2AirInputProxy.gameObject);
                 p2AirInputProxy = null;
             }
+            if (harmony != null)
+            {
+                harmony.UnpatchSelf();
+                harmony = null;
+            }
+        }
+
+        internal static void ResetP2VisualResources()
+        {
+            ResetP2ShellMaterials();
+            preparedP2Id = 0;
+            preparedP2WindId = 0;
+            diagnosticP2Id = 0;
+            lastDistanceBand = -1;
         }
 
         private static void AlignP2CameraWithSmoothedSpider()
@@ -367,6 +391,10 @@ namespace AWJSplitScreenUpdateFix
 
         private static void LogP2AirPhysics(object p2BodyObject)
         {
+            if (!ReadStaticBool(debugSpeedLogField))
+            {
+                return;
+            }
             try
             {
                 string state = bodyStateProperty == null ? "?" : Convert.ToString(bodyStateProperty.GetValue(p2BodyObject, null));
@@ -422,6 +450,10 @@ namespace AWJSplitScreenUpdateFix
                 if (Time.unscaledTime - lastSharedPhysicsDiagnosticTime < 0.5f || bodyMovementType == null)
                     return;
 
+                // Advance the throttle before inspecting scene state. Otherwise an idle
+                // game repeats these global searches every frame indefinitely.
+                lastSharedPhysicsDiagnosticTime = Time.unscaledTime;
+
                 GameObject p1Object = GameObject.Find("PlayerSpider");
                 GameObject p2Object = GameObject.Find("PlayerSpider_P2");
                 Component p1Body = p1Object == null ? null : p1Object.GetComponentInChildren(bodyMovementType, true);
@@ -439,7 +471,6 @@ namespace AWJSplitScreenUpdateFix
                     !p1WebActive && !p2WebActive)
                     return;
 
-                lastSharedPhysicsDiagnosticTime = Time.unscaledTime;
                 Rigidbody p1Rb = p1Body == null || rigidbodyField == null ? null : rigidbodyField.GetValue(p1Body) as Rigidbody;
                 Rigidbody p2Rb = p2Body == null || rigidbodyField == null ? null : rigidbodyField.GetValue(p2Body) as Rigidbody;
                 object liveJointObject = webControllerInstance == null || webSpringJointField == null ? null : webSpringJointField.GetValue(webControllerInstance);
@@ -480,8 +511,12 @@ namespace AWJSplitScreenUpdateFix
             }
         }
 
-        public static bool CameraMouseLookOnLookPrefix(object __0)
+        public static bool CameraMouseLookOnLookPrefix(object __instance, object __0)
         {
+            if (!AWJSplitScreen.SplitScreenMod.IsSplitScreenActive)
+            {
+                return true;
+            }
             if (!ReadStaticBool(p2UseGamepadField))
             {
                 return true;
@@ -490,21 +525,39 @@ namespace AWJSplitScreenUpdateFix
             int gamepadIndex = ReadStaticInt(p2GamepadIndexField, 1);
             try
             {
+                Vector2 retainedBefore = Vector2.zero;
+                if (cameraLookInputField != null && cameraLookInputField.GetValue(__instance) is Vector2)
+                    retainedBefore = (Vector2)cameraLookInputField.GetValue(__instance);
+                float deadzone = ReadStaticFloat(p2DeadzoneField, 0.15f);
+                Vector2 rightStick = Vector2.zero;
+                object rightStickValue = inputGetP2RightStickMethod == null
+                    ? null
+                    : inputGetP2RightStickMethod.Invoke(null, new object[] { gamepadIndex, deadzone });
+                if (rightStickValue is Vector2)
+                    rightStick = (Vector2)rightStickValue;
+
                 // Prefer the exact callback-device test.  The fallback below is for the
                 // game's updated composite binding, which no longer always reports P2's
                 // device on the callback passed to the old split-screen patch.
                 if (inputIsCallbackFromP2Method != null && inputIsCallbackFromP2Method.Invoke(null, new object[] { __0, gamepadIndex }) is bool fromP2 && fromP2)
                 {
+                    AWJSplitScreen.CameraIsolationDiagnostics.LogLookCallback(__instance, __0, rightStick, true, true, retainedBefore);
+                    ClearCameraLookInput(__instance);
                     return false;
                 }
 
-                float deadzone = ReadStaticFloat(p2DeadzoneField, 0.15f);
-                if (inputGetP2RightStickMethod != null && inputGetP2RightStickMethod.Invoke(null, new object[] { gamepadIndex, deadzone }) is Vector2 rightStick && rightStick.sqrMagnitude > 0f)
+                if (rightStick.sqrMagnitude > 0f)
                 {
                     // P2's camera is driven directly by the split-screen camera rig.
                     // Never also feed that stick into P1's game action in the same frame.
+                    // CameraMouseLook reuses its last value every Update, so clear any
+                    // sample that slipped through before callback ownership was known.
+                    AWJSplitScreen.CameraIsolationDiagnostics.LogLookCallback(__instance, __0, rightStick, true, true, retainedBefore);
+                    ClearCameraLookInput(__instance);
                     return false;
                 }
+
+                AWJSplitScreen.CameraIsolationDiagnostics.LogLookCallback(__instance, __0, rightStick, false, false, retainedBefore);
             }
             catch (Exception exception)
             {
@@ -512,6 +565,16 @@ namespace AWJSplitScreenUpdateFix
             }
 
             return true;
+        }
+
+        private static void ClearCameraLookInput(object instance)
+        {
+            try
+            {
+                if (instance != null && cameraLookInputField != null)
+                    cameraLookInputField.SetValue(instance, Vector2.zero);
+            }
+            catch { }
         }
 
         private static bool ReadStaticBool(FieldInfo field)
@@ -738,6 +801,7 @@ namespace AWJSplitScreenUpdateFix
             GameObject playerTwo = GameObject.Find("PlayerSpider_P2");
             if (playerOne == null || playerTwo == null)
             {
+                ResetP2ShellMaterials();
                 preparedP2Id = 0;
                 diagnosticP2Id = 0;
                 lastDistanceBand = -1;
@@ -1191,7 +1255,7 @@ namespace AWJSplitScreenUpdateFix
 
         private static void CreateP2ShellMaterialInstances(Component[] p2Shells)
         {
-            p2ShellMaterials.Clear();
+            ResetP2ShellMaterials();
             Dictionary<Material, Material> materialInstances = new Dictionary<Material, Material>();
             foreach (Component shell in p2Shells)
             {
@@ -1221,6 +1285,16 @@ namespace AWJSplitScreenUpdateFix
                 }
             }
             UpdateP2ShellMaterialPosition();
+        }
+
+        private static void ResetP2ShellMaterials()
+        {
+            foreach (Material material in p2ShellMaterials)
+            {
+                if (material != null)
+                    UnityEngine.Object.Destroy(material);
+            }
+            p2ShellMaterials.Clear();
         }
 
         private static void EnsureP2MotionVisuals()
@@ -1304,7 +1378,9 @@ namespace AWJSplitScreenUpdateFix
                 originalWindDriver.enabled = false;
             }
             p2Wind.gameObject.SetActive(true);
-            SetLayerRecursively(p2Wind.transform, p2Camera.gameObject.layer);
+            // Keep the source effect layer. P2's camera inherits P1's culling mask,
+            // while its own GameObject can be on Ignore Raycast and therefore invisible.
+            // Moving the trail onto the camera layer was the reason it never rendered.
 
             P2WindTrail trail = p2Wind.GetComponent<P2WindTrail>();
             if (trail == null)
@@ -1314,27 +1390,14 @@ namespace AWJSplitScreenUpdateFix
 
             float activateThreshold = ReadFloat(windActivateThresholdField, p2Wind, 12f);
             float deactivateThreshold = ReadFloat(windDeactivateThresholdField, p2Wind, activateThreshold * 0.8f);
-            trail.Configure(p2Rigidbody, activateThreshold, deactivateThreshold);
+            float maxVelocity = ReadFloat(windMaxVelocityField, p2Wind, activateThreshold * 2f);
+            trail.Configure(p2Rigidbody, activateThreshold, deactivateThreshold, maxVelocity);
 
             int windId = p2Wind.GetInstanceID();
             if (preparedP2WindId != windId)
             {
                 preparedP2WindId = windId;
                 MelonLogger.Msg("[UpdateFix] Connected P2's wind trail to P2 velocity (activate=" + activateThreshold.ToString("F1") + ", deactivate=" + deactivateThreshold.ToString("F1") + ").");
-            }
-        }
-
-        private static void SetLayerRecursively(Transform root, int layer)
-        {
-            if (root == null)
-            {
-                return;
-            }
-
-            root.gameObject.layer = layer;
-            for (int childIndex = 0; childIndex < root.childCount; childIndex++)
-            {
-                SetLayerRecursively(root.GetChild(childIndex), layer);
             }
         }
 
@@ -1360,7 +1423,7 @@ namespace AWJSplitScreenUpdateFix
             GameObject playerTwo = GameObject.Find("PlayerSpider_P2");
             if (playerTwo == null)
             {
-                p2ShellMaterials.Clear();
+                ResetP2ShellMaterials();
                 return;
             }
 
@@ -1511,16 +1574,44 @@ namespace AWJSplitScreenUpdateFix
             private ParticleSystem[] particleSystems;
             private float activateThreshold;
             private float deactivateThreshold;
+            private float maxVelocity;
             private bool active;
+            private bool reportedParticleSetup;
+            private float nextDiagnosticTime;
+            private float fallbackEmissionRemainder;
+            private static object musicController;
+            private static MethodInfo startWindLoopMethod;
+            private static MethodInfo stopWindLoopMethod;
+            private static MethodInfo setWindLoopSpeedMethod;
 
-            public void Configure(Rigidbody rigidbody, float activateAt, float deactivateAt)
+            public void Configure(Rigidbody rigidbody, float activateAt, float deactivateAt, float maxWindVelocity)
             {
                 playerRigidbody = rigidbody;
                 activateThreshold = Mathf.Max(0f, activateAt);
                 deactivateThreshold = Mathf.Clamp(deactivateAt, 0f, activateThreshold);
+                maxVelocity = Mathf.Max(activateThreshold + 0.01f, maxWindVelocity);
                 if (particleSystems == null || particleSystems.Length == 0)
                 {
                     particleSystems = GetComponentsInChildren<ParticleSystem>(true);
+                    foreach (ParticleSystem system in particleSystems)
+                    {
+                        if (system == null) continue;
+                        ParticleSystemRenderer renderer = system.GetComponent<ParticleSystemRenderer>();
+                        if (renderer != null) renderer.enabled = true;
+                        ParticleSystem.EmissionModule emission = system.emission;
+                        // The cloned wind prefab has a zero-rate module in the P2
+                        // camera context. Its original driver only toggles emission,
+                        // so supply the same continuous stream explicitly.
+                        if (emission.rateOverTime.constantMax <= 0f && emission.rateOverDistance.constantMax <= 0f)
+                            emission.rateOverTime = new ParticleSystem.MinMaxCurve(35f);
+                        system.gameObject.SetActive(true);
+                    }
+                }
+
+                if (!reportedParticleSetup)
+                {
+                    reportedParticleSetup = true;
+                    MelonLogger.Msg("[UpdateFix] P2 wind trail prepared with " + (particleSystems == null ? 0 : particleSystems.Length) + " particle system(s).");
                 }
             }
 
@@ -1539,6 +1630,28 @@ namespace AWJSplitScreenUpdateFix
                 else if (active && speed < deactivateThreshold)
                 {
                     SetActive(false);
+                }
+
+                // The game's wind loop is global and its original driver only watches
+                // P1. Keep it alive while P2 is moving fast; P1's driver still owns
+                // stopping it when neither player is above the threshold.
+                if (active)
+                {
+                    UpdateWindSound(speed);
+                    EmitWindParticles(speed);
+                }
+                else
+                {
+                    StopWindSoundIfNeitherPlayerIsFast();
+                }
+
+                if (Time.unscaledTime >= nextDiagnosticTime)
+                {
+                    nextDiagnosticTime = Time.unscaledTime + 2f;
+                    ParticleSystem system = particleSystems.Length > 0 ? particleSystems[0] : null;
+                    MelonLogger.Msg("[UpdateFix] P2 wind state: active=" + active + " speed=" + speed.ToString("F1") +
+                        " emitting=" + (system != null && system.isEmitting) + " playing=" + (system != null && system.isPlaying) +
+                        " particles=" + (system == null ? 0 : system.particleCount) + " layer=" + (system == null ? -1 : system.gameObject.layer));
                 }
             }
 
@@ -1564,6 +1677,76 @@ namespace AWJSplitScreenUpdateFix
                         system.Play(true);
                     }
                 }
+            }
+
+            private void EmitWindParticles(float speed)
+            {
+                if (particleSystems == null) return;
+
+                // The copied game prefab reports itself as emitting but produces no
+                // particles for P2. Emit from the same systems directly so its saved
+                // renderer/material still defines the look of the wind trail.
+                fallbackEmissionRemainder += 25f * Time.deltaTime;
+                int particleCount = Mathf.FloorToInt(fallbackEmissionRemainder);
+                if (particleCount == 0) return;
+                fallbackEmissionRemainder -= particleCount;
+
+                foreach (ParticleSystem system in particleSystems)
+                {
+                    if (system == null) continue;
+                    ParticleSystem.MainModule main = system.main;
+                    if (main.maxParticles < 250) main.maxParticles = 250;
+                    system.Emit(particleCount);
+                }
+            }
+
+            private void UpdateWindSound(float speed)
+            {
+                try
+                {
+                    EnsureMusicController();
+
+                    if (musicController != null)
+                    {
+                        if (startWindLoopMethod != null) startWindLoopMethod.Invoke(musicController, null);
+                        if (setWindLoopSpeedMethod != null)
+                            setWindLoopSpeedMethod.Invoke(musicController, new object[] { Mathf.InverseLerp(deactivateThreshold, maxVelocity, speed) });
+                    }
+                }
+                catch { }
+            }
+
+            private static void EnsureMusicController()
+            {
+                if (musicController != null) return;
+
+                Type musicControllerType = AccessTools.TypeByName("_Scripts.Singletons.MusicController");
+                Type singletonType = musicControllerType == null ? null : musicControllerType.BaseType;
+                PropertyInfo instanceProperty = singletonType == null ? null : singletonType.GetProperty("Instance", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
+                musicController = instanceProperty == null ? null : instanceProperty.GetValue(null, null);
+                startWindLoopMethod = musicControllerType == null ? null : AccessTools.Method(musicControllerType, "StartWindLoop");
+                stopWindLoopMethod = musicControllerType == null ? null : AccessTools.Method(musicControllerType, "StopWindLoop");
+                setWindLoopSpeedMethod = musicControllerType == null ? null : AccessTools.Method(musicControllerType, "SetWindLoopSpeed");
+            }
+
+            private void StopWindSoundIfNeitherPlayerIsFast()
+            {
+                try
+                {
+                    if (musicController == null)
+                    {
+                        EnsureMusicController();
+                    }
+
+                    GameObject playerOne = GameObject.Find("PlayerSpider");
+                    Rigidbody p1Rigidbody = playerOne == null ? null : playerOne.GetComponentInChildren<Rigidbody>(true);
+                    if (p1Rigidbody == null || p1Rigidbody.linearVelocity.magnitude < deactivateThreshold)
+                    {
+                        if (musicController != null && stopWindLoopMethod != null)
+                            stopWindLoopMethod.Invoke(musicController, null);
+                    }
+                }
+                catch { }
             }
         }
     }

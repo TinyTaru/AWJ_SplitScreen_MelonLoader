@@ -26,7 +26,7 @@ Key settings:
 - `P2_GamepadIndex` (default 1 = second pad)
 - `FilterP1FromP2Gamepad` (default true)
 - `P2_CameraDistance` (default 14, near P1's typical distance)
-- `Debug_SpeedLog` (default false; when true, logs P1/P2 average horizontal ground speed per second plus move vector and sprint state — for verifying both players cover the same distance. Test on flat, static ground: standing on moving surfaces inflates the numbers.)
+- `Debug_SpeedLog` (default false; when true, logs P1/P2 movement plus detailed camera callback, stick, transform, driver, and zoom state. Camera lines are prefixed with `CamDiag`.)
 
 Note on sprint: P2's Left Stick Click now reliably toggles sprint ON and OFF in every game input mode (it previously latched on), and note the game itself latches P1's sprint as a toggle on gamepad — the speed log shows both sprint states if you need to check.
 

@@ -16,6 +16,8 @@ namespace AWJSplitScreen
     public sealed class SplitScreenMod : MelonMod
     {
         private static SplitScreenMod _instance;
+        private const string HarmonyId = "AWJ.SplitScreen.P2Inject.v022";
+        private HarmonyLib.Harmony _harmony;
         internal static bool SkipCallbackContextPatches;
 
         // Shared config/state for patches
@@ -91,6 +93,7 @@ namespace AWJSplitScreen
         internal static GameObject _p2Spider;
         private Transform _p1InputTransform;
         private readonly List<ReanchoredTransformParent> _p1CloneReanchors = new List<ReanchoredTransformParent>();
+        private readonly Dictionary<Camera, int> _globalEffectCameraMasks = new Dictionary<Camera, int>();
 
         private Vector3 _p2CamDir;        // direction from pivot to camera (normalized, derived from yaw/pitch)
         private Vector3 _p2SmoothUp;      // smoothed spider surface up (lerped each frame)
@@ -198,7 +201,7 @@ namespace AWJSplitScreen
             _p2TriggerThresholdPref = _prefs.CreateEntry("P2_TriggerThreshold", 0.35f, "Trigger threshold for shooting");
             _filterP1FromP2PadPref = _prefs.CreateEntry("FilterP1FromP2Gamepad", true, "Prevent P1 from reacting to P2's gamepad (recommended for 2-controller play)");
             _p2CameraDistancePref = _prefs.CreateEntry("P2_CameraDistance", 14.0f, "P2 third-person camera distance (near P1's typical distance)");
-            _debugSpeedLogPref = _prefs.CreateEntry("Debug_SpeedLog", false, "Log P1/P2 horizontal ground speed, moveVector and sprint state once per second");
+            _debugSpeedLogPref = _prefs.CreateEntry("Debug_SpeedLog", false, "Log movement plus detailed P1/P2 camera input, driver, pose and zoom diagnostics");
 
             // One-time default correction: the log showed P1 sits far (~16) while the
             // old 8.0 / interim 5.6 defaults left P2 too close. A per-value marker keeps
@@ -224,20 +227,25 @@ namespace AWJSplitScreen
                 message => LoggerInstance.Msg(message),
                 message => LoggerInstance.Error(message));
 
-            SceneManager.sceneLoaded += (_, __) => MelonCoroutines.Start(DeferredSetup());
+            SceneManager.sceneLoaded += OnSceneLoaded;
 
             RenderPipelineManager.beginCameraRendering += OnBeginCameraRendering;
             RenderPipelineManager.endCameraRendering += OnEndCameraRendering;
 
             LoggerInstance.Msg("AWJ Split Screen + P2 Inject v0.2.2 loaded.");
             LoggerInstance.Msg("F8 swap controllers, F9 split, F10 orientation | P2 Move: IJKL or Gamepad LStick | P2 Sprint: LStick click (toggles on/off in all modes) | P2 Look: N/M or RStickX | P2 Zoom: RStick press | P2 Jump: A | P2 Interact: H/X | P2 Web: RT shoot/release, LT quick build, LB fixed anchor, RB moving anchor, B delete/cancel.");
-            LoggerInstance.Msg("Diagnostics: set Debug_SpeedLog=true in MelonPreferences.cfg to log P1/P2 speed, sprint and camera distance once per second. Press F7 to dump all task/quest states.");
+            LoggerInstance.Msg("Diagnostics: set Debug_SpeedLog=true in MelonPreferences.cfg to log movement and detailed camera input/driver/pose state. Press F7 to dump all task/quest states.");
             LoggerInstance.Msg("Tip: If both controllers still move P1, ensure FilterP1FromP2Gamepad=true and P2_GamepadIndex is the second pad (usually 1).");
         }
 
         public static bool P1CameraUnderwater = false;
         public static bool P2CameraUnderwater = false;
         public static VolumeProfile[] TrackedWaterProfiles = null;
+
+        private void OnSceneLoaded(Scene scene, LoadSceneMode mode)
+        {
+            MelonCoroutines.Start(DeferredSetup());
+        }
 
         private void OnBeginCameraRendering(ScriptableRenderContext context, Camera camera)
         {
@@ -264,6 +272,9 @@ namespace AWJSplitScreen
 
         private static void ApplyWaterProfileState(bool value)
         {
+            if (TrackedWaterProfiles == null)
+                return;
+
             foreach (var profile in TrackedWaterProfiles)
             {
                 if (profile == null) continue;
@@ -272,6 +283,14 @@ namespace AWJSplitScreen
                 if (profile.TryGet<PaniniProjection>(out var pp))
                     pp.active = value;
             }
+        }
+
+        private static void ResetWaterRenderingState()
+        {
+            ApplyWaterProfileState(false);
+            P1CameraUnderwater = false;
+            P2CameraUnderwater = false;
+            TrackedWaterProfiles = null;
         }
 
         private void ApplyPrefsToStatics()
@@ -326,12 +345,23 @@ namespace AWJSplitScreen
 
         public override void OnDeinitializeMelon()
         {
+            SceneManager.sceneLoaded -= OnSceneLoaded;
+            RenderPipelineManager.beginCameraRendering -= OnBeginCameraRendering;
+            RenderPipelineManager.endCameraRendering -= OnEndCameraRendering;
+            Teardown();
             AWJSplitScreenUpdateFix.UpdateFixMod.Deinitialize();
+            if (_harmony != null)
+            {
+                _harmony.UnpatchSelf();
+                _harmony = null;
+            }
+            _instance = null;
         }
 
         private void InstallHarmonyPatches()
         {
-            var h = new HarmonyLib.Harmony("AWJ.SplitScreen.P2Inject.v022");
+            _harmony = new HarmonyLib.Harmony(HarmonyId);
+            var h = _harmony;
             SkipCallbackContextPatches = IsIl2CppRuntime();
             if (SkipCallbackContextPatches)
                 LoggerInstance.Warning("Detected IL2CPP runtime. CallbackContext patches are disabled for stability.");
@@ -967,14 +997,14 @@ namespace AWJSplitScreen
             _p1CameraZoomCached = false;
             _p1CameraMouseLookCached = false;
             _p1FollowCached = false;
+            ResetP1ShoulderIsolationCache();
 
             if (_enabled != null && !_enabled.Value)
                 yield break;
 
             if (!CanUseSplitScreenInCurrentScene())
             {
-                if (_enabled != null) _enabled.Value = false;
-                LoggerInstance.Warning("Split-screen is only available in gameplay after PlayerSpider has spawned.");
+                LoggerInstance.Msg("Split-screen setup deferred until PlayerSpider has spawned.");
                 yield break;
             }
 
@@ -1022,6 +1052,8 @@ namespace AWJSplitScreen
                                 var cam = fi.GetValue(c) as Camera;
                                 if (cam != null && (cam.cullingMask & p2LayerMask) == 0)
                                 {
+                                    if (!_globalEffectCameraMasks.ContainsKey(cam))
+                                        _globalEffectCameraMasks.Add(cam, cam.cullingMask);
                                     cam.cullingMask |= p2LayerMask;
                                     LoggerInstance.Msg("Added P2 layer to " + t.Name + "." + fi.Name + " cullingMask.");
                                 }
@@ -1391,6 +1423,92 @@ namespace AWJSplitScreen
 
             UpdateP2CameraLook();
             AWJSplitScreenUpdateFix.UpdateFixMod.LateUpdate();
+            EnforceP1CameraShoulderOffset();
+        }
+
+        private int _p1ShoulderCorrectionLogs;
+        private Component _p1ShoulderController;
+        private Component _p1ShoulderFollowTarget;
+        private object _p1ShoulderFollowBody;
+        private FieldInfo _p1ShoulderControllerField;
+        private FieldInfo _p1ShoulderTargetField;
+        private FieldInfo _p1ShoulderSpiderOffsetField;
+        private FieldInfo _p1ShoulderFollowField;
+
+        private void ResetP1ShoulderIsolationCache()
+        {
+            _p1ShoulderController = null;
+            _p1ShoulderFollowTarget = null;
+            _p1ShoulderFollowBody = null;
+            _p1ShoulderControllerField = null;
+            _p1ShoulderTargetField = null;
+            _p1ShoulderSpiderOffsetField = null;
+            _p1ShoulderFollowField = null;
+        }
+
+        private bool CacheP1ShoulderIsolation()
+        {
+            if (_p1ShoulderController != null && _p1ShoulderFollowTarget != null &&
+                _p1ShoulderFollowBody != null && _p1ShoulderControllerField != null &&
+                _p1ShoulderTargetField != null && _p1ShoulderSpiderOffsetField != null &&
+                _p1ShoulderFollowField != null)
+                return true;
+
+            ResetP1ShoulderIsolationCache();
+            const BindingFlags F = BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public;
+            Type controllerType = AccessTools.TypeByName("_Scripts.Singletons.CameraController");
+            if (controllerType == null) return false;
+
+            UnityEngine.Object[] controllers = UnityEngine.Object.FindObjectsOfType(controllerType, true);
+            _p1ShoulderController = controllers != null && controllers.Length > 0 ? controllers[0] as Component : null;
+            if (_p1ShoulderController == null) return false;
+
+            FieldInfo followTargetField = controllerType.GetField("followCameraFollowTarget", F);
+            _p1ShoulderFollowTarget = followTargetField == null ? null : followTargetField.GetValue(_p1ShoulderController) as Component;
+            _p1ShoulderControllerField = controllerType.GetField("shoulderOffset", F);
+            if (_p1ShoulderFollowTarget == null || _p1ShoulderControllerField == null) return false;
+
+            _p1ShoulderTargetField = AccessTools.Field(_p1ShoulderFollowTarget.GetType(), "target");
+            _p1ShoulderSpiderOffsetField = AccessTools.Field(_p1ShoulderFollowTarget.GetType(), "spiderOffset");
+            if (_p1ShoulderTargetField == null || _p1ShoulderSpiderOffsetField == null) return false;
+
+            if (!TryGetP1Follow3rdPerson(out _p1ShoulderFollowBody, out Type followType)) return false;
+            _p1ShoulderFollowField = followType.GetField("ShoulderOffset", F)
+                ?? AccessTools.Field(followType, "m_ShoulderOffset");
+            return _p1ShoulderFollowField != null;
+        }
+
+        private void EnforceP1CameraShoulderOffset()
+        {
+            try
+            {
+                if (!CacheP1ShoulderIsolation()) return;
+
+                Transform target = _p1ShoulderTargetField.GetValue(_p1ShoulderFollowTarget) as Transform;
+                object spiderOffsetValue = _p1ShoulderSpiderOffsetField.GetValue(_p1ShoulderFollowTarget);
+                if (target == null || !(spiderOffsetValue is Vector3)) return;
+
+                Vector3 spiderOffset = (Vector3)spiderOffsetValue;
+                Vector3 authoritativeOffset = _p1ShoulderFollowTarget.transform.InverseTransformVector(target.up * spiderOffset.y);
+
+                Vector3 priorControllerOffset = _p1ShoulderControllerField.GetValue(_p1ShoulderController) is Vector3
+                    ? (Vector3)_p1ShoulderControllerField.GetValue(_p1ShoulderController)
+                    : authoritativeOffset;
+                _p1ShoulderControllerField.SetValue(_p1ShoulderController, authoritativeOffset);
+                _p1ShoulderFollowField.SetValue(_p1ShoulderFollowBody, authoritativeOffset);
+
+                if (DebugSpeedLog && (priorControllerOffset - authoritativeOffset).sqrMagnitude > 0.000001f &&
+                    _p1ShoulderCorrectionLogs++ < 8)
+                {
+                    LoggerInstance.Msg("[CameraIsolation] Enforced P1 shoulder offset " +
+                        priorControllerOffset.ToString("F3") + " -> " + authoritativeOffset.ToString("F3"));
+                }
+            }
+            catch (Exception ex)
+            {
+                if (DebugSpeedLog && _p1ShoulderCorrectionLogs++ < 8)
+                    LoggerInstance.Warning("[CameraIsolation] Direct shoulder enforcement failed: " + ex.Message);
+            }
         }
 
 
@@ -1417,12 +1535,68 @@ namespace AWJSplitScreen
             var al = _camRightOrBottom.GetComponent<AudioListener>();
             if (al != null) al.enabled = false;
 
+            NeutralizeP2CameraPhysics(_camLeftOrTop, _camRightOrBottom);
             DisableComponentByTypeName(_camRightOrBottom.gameObject, "Cinemachine.CinemachineBrain");
             DisableCameraDriverBehaviours(_camRightOrBottom.gameObject);
 
             P2Camera = _camRightOrBottom;
 
             ApplyCameraRects();
+        }
+
+        private void NeutralizeP2CameraPhysics(Camera p1Camera, Camera p2Camera)
+        {
+            if (p2Camera == null) return;
+
+            // The output camera prefab carries a SphereCollider + Rigidbody for
+            // CameraWaterTrigger. Cloning the whole camera also clones that physical body.
+            // Moving the P2 camera transform then makes it push P1's original camera body,
+            // translating P1 without changing CameraMouseLook or Cinemachine state.
+            // Remove the cloned physics participation entirely. P1's original water sensor
+            // remains intact; P2 underwater sensing can be reintroduced as a query-based
+            // probe without putting a collider into Cinemachine's obstruction world.
+            Collider[] p2Colliders = p2Camera.GetComponentsInChildren<Collider>(true);
+            for (int i = 0; p2Colliders != null && i < p2Colliders.Length; i++)
+            {
+                Collider collider = p2Colliders[i];
+                if (collider != null)
+                {
+                    // Cinemachine3rdPersonFollow uses an explicit collision mask and can
+                    // include both triggers and Unity's Ignore Raycast layer. Disable the
+                    // cloned sensor completely so it cannot enter P1's obstruction query.
+                    collider.enabled = false;
+                }
+            }
+
+            Rigidbody[] p2Bodies = p2Camera.GetComponentsInChildren<Rigidbody>(true);
+            for (int i = 0; p2Bodies != null && i < p2Bodies.Length; i++)
+            {
+                Rigidbody body = p2Bodies[i];
+                if (body == null) continue;
+                body.linearVelocity = Vector3.zero;
+                body.angularVelocity = Vector3.zero;
+                body.useGravity = false;
+                body.isKinematic = true;
+                body.detectCollisions = false;
+                body.constraints = RigidbodyConstraints.FreezeAll;
+            }
+
+            // Explicitly ignore the P1/P2 camera pair as an extra guard if another
+            // component changes either collider's trigger state later.
+            Collider[] p1Colliders = p1Camera == null ? null : p1Camera.GetComponentsInChildren<Collider>(true);
+            for (int p1 = 0; p1Colliders != null && p1 < p1Colliders.Length; p1++)
+            {
+                if (p1Colliders[p1] == null) continue;
+                for (int p2 = 0; p2Colliders != null && p2 < p2Colliders.Length; p2++)
+                {
+                    if (p2Colliders[p2] != null)
+                        Physics.IgnoreCollision(p1Colliders[p1], p2Colliders[p2], true);
+                }
+            }
+
+            LoggerInstance.Msg("Neutralized P2 camera physics: triggers=" +
+                (p2Colliders == null ? 0 : p2Colliders.Length) + " rigidbodies=" +
+                (p2Bodies == null ? 0 : p2Bodies.Length) + " collidersDisabled=true.");
         }
 
         private void ApplyCameraRects()
@@ -3018,6 +3192,15 @@ namespace AWJSplitScreen
             RestoreReanchoredTargets(_p1CloneReanchors);
             _p1CloneReanchors.Clear();
 
+            foreach (var pair in _globalEffectCameraMasks)
+            {
+                if (pair.Key != null)
+                    pair.Key.cullingMask = pair.Value;
+            }
+            _globalEffectCameraMasks.Clear();
+            ResetWaterRenderingState();
+            AWJSplitScreenUpdateFix.UpdateFixMod.ResetP2VisualResources();
+
             if (_camLeftOrTop != null) _camLeftOrTop.rect = new Rect(0f, 0f, 1f, 1f);
 
             if (_camRightOrBottom != null)
@@ -3147,6 +3330,16 @@ namespace AWJSplitScreen
         private FieldInfo _fWebTargetFixedAnchorMaterial;
         private FieldInfo _fWebAnchorMovingAnchorMaterial;
         private FieldInfo _fWebTargetMovingAnchorMaterial;
+        // WebController caches these emitters from P1's WebTarget in AssignSounds.
+        // They need to be part of the state capsule too, otherwise P2 actions play at
+        // P1's target object (often outside the audible range of P2's camera).
+        private FieldInfo _fBuildThreadSound;
+        private FieldInfo _fAttachAnchorSound;
+        private FieldInfo _fDeleteThreadSound;
+        private FieldInfo _fCantBuildSound;
+        private FieldInfo _fAttachToPlayerSound;
+        private FieldInfo _fMusicThreadSound;
+        private FieldInfo _fWebSound;
         private AnimationCurve _webTargetSizeCurve;
         private float _webDistanceVal = 50f;
         // CameraController.mainCamera private field — game systems often access this
@@ -3177,6 +3370,9 @@ namespace AWJSplitScreen
         private GameObject _p2TargetDot;
         private GameObject _p2AnchorDot;
         private LineRenderer _webIndicatorLine;
+        private Material _p2TargetDotMaterial;
+        private Material _p2AnchorDotMaterial;
+        private Material _grappleLineMaterial;
         private float _p2DotScale = 0.5f;
         private float _p2NormalOffset = 0.05f;
 
@@ -3340,6 +3536,7 @@ namespace AWJSplitScreen
                 try { mat.SetInt("_ZWrite", 0); } catch { }
                 mat.renderQueue = 5000;
                 rend.material = mat;
+                _p2TargetDotMaterial = mat;
                 rend.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
                 rend.receiveShadows = false;
             }
@@ -3398,6 +3595,7 @@ namespace AWJSplitScreen
                 try { mat.SetInt("_ZWrite", 0); } catch { }
                 mat.renderQueue = 5000;
                 rend.material = mat;
+                _p2AnchorDotMaterial = mat;
                 rend.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
                 rend.receiveShadows = false;
             }
@@ -3435,9 +3633,9 @@ namespace AWJSplitScreen
             // Fallback if no web material found yet
             if (!_webLineMatCached)
             {
-                var lineMat = new Material(Shader.Find("Sprites/Default") ?? Shader.Find("Unlit/Color") ?? Shader.Find("Standard"));
-                lineMat.color = new Color(0.9f, 0.9f, 1f, 0.8f);
-                _grappleLine.material = lineMat;
+                _grappleLineMaterial = new Material(Shader.Find("Sprites/Default") ?? Shader.Find("Unlit/Color") ?? Shader.Find("Standard"));
+                _grappleLineMaterial.color = new Color(0.9f, 0.9f, 1f, 0.8f);
+                _grappleLine.material = _grappleLineMaterial;
             }
             _grappleLine.enabled = false;
         }
@@ -3520,7 +3718,9 @@ namespace AWJSplitScreen
 
                 if (bestLR != null)
                 {
-                    _grappleLine.material = new Material(bestLR.material);
+                    DestroyOwnedMaterial(ref _grappleLineMaterial);
+                    _grappleLineMaterial = new Material(bestLR.material);
+                    _grappleLine.material = _grappleLineMaterial;
                     _grappleLine.startWidth = bestLR.startWidth;
                     _grappleLine.endWidth = bestLR.endWidth;
                     _grappleLine.widthMultiplier = bestLR.widthMultiplier;
@@ -3776,6 +3976,13 @@ namespace AWJSplitScreen
                 _fWebTargetFixedAnchorMaterial = TryGetField("webTargetFixedAnchorMaterial");
                 _fWebAnchorMovingAnchorMaterial = TryGetField("webAnchorMovingAnchorMaterial");
                 _fWebTargetMovingAnchorMaterial = TryGetField("webTargetMovingAnchorMaterial");
+                _fBuildThreadSound = TryGetField("buildThreadSound");
+                _fAttachAnchorSound = TryGetField("attachAnchorSound");
+                _fDeleteThreadSound = TryGetField("deleteThreadSound");
+                _fCantBuildSound = TryGetField("cantBuildSound");
+                _fAttachToPlayerSound = TryGetField("attachToPlayerSound");
+                _fMusicThreadSound = TryGetField("musicThreadSound");
+                _fWebSound = TryGetField("webSound");
                 try
                 {
                     if (_fWebTargetSize != null) _webTargetSizeCurve = _fWebTargetSize.GetValue(_p1WebController) as AnimationCurve;
@@ -3954,6 +4161,13 @@ namespace AWJSplitScreen
                 if (_fPlayerWebJoint != null) c.playerWebJoint = _fPlayerWebJoint.GetValue(_p1WebController);
                 if (_fDeleteWebPressed != null) c.deleteWebPressed = (bool)_fDeleteWebPressed.GetValue(_p1WebController);
                 if (_fDeletePlayerWebsTimer != null) c.deletePlayerWebsTimer = (float)_fDeletePlayerWebsTimer.GetValue(_p1WebController);
+                if (_fBuildThreadSound != null) c.buildThreadSound = _fBuildThreadSound.GetValue(_p1WebController);
+                if (_fAttachAnchorSound != null) c.attachAnchorSound = _fAttachAnchorSound.GetValue(_p1WebController);
+                if (_fDeleteThreadSound != null) c.deleteThreadSound = _fDeleteThreadSound.GetValue(_p1WebController);
+                if (_fCantBuildSound != null) c.cantBuildSound = _fCantBuildSound.GetValue(_p1WebController);
+                if (_fAttachToPlayerSound != null) c.attachToPlayerSound = _fAttachToPlayerSound.GetValue(_p1WebController);
+                if (_fMusicThreadSound != null) c.musicThreadSound = _fMusicThreadSound.GetValue(_p1WebController);
+                if (_fWebSound != null) c.webSound = _fWebSound.GetValue(_p1WebController) as string;
             }
             catch (Exception ex)
             {
@@ -3983,6 +4197,13 @@ namespace AWJSplitScreen
                 if (_fPlayerWebJoint != null) _fPlayerWebJoint.SetValue(_p1WebController, c.playerWebJoint);
                 if (_fDeleteWebPressed != null) _fDeleteWebPressed.SetValue(_p1WebController, c.deleteWebPressed);
                 if (_fDeletePlayerWebsTimer != null) _fDeletePlayerWebsTimer.SetValue(_p1WebController, c.deletePlayerWebsTimer);
+                if (_fBuildThreadSound != null) _fBuildThreadSound.SetValue(_p1WebController, c.buildThreadSound);
+                if (_fAttachAnchorSound != null) _fAttachAnchorSound.SetValue(_p1WebController, c.attachAnchorSound);
+                if (_fDeleteThreadSound != null) _fDeleteThreadSound.SetValue(_p1WebController, c.deleteThreadSound);
+                if (_fCantBuildSound != null) _fCantBuildSound.SetValue(_p1WebController, c.cantBuildSound);
+                if (_fAttachToPlayerSound != null) _fAttachToPlayerSound.SetValue(_p1WebController, c.attachToPlayerSound);
+                if (_fMusicThreadSound != null) _fMusicThreadSound.SetValue(_p1WebController, c.musicThreadSound);
+                if (_fWebSound != null) _fWebSound.SetValue(_p1WebController, c.webSound);
             }
             catch (Exception ex)
             {
@@ -4242,6 +4463,7 @@ namespace AWJSplitScreen
                 if (_p2WebTargetTr != null) _p2Capsule.webTarget = _p2WebTargetTr;
                 if (_p2WebAnchorTr != null) _p2Capsule.webAnchor = _p2WebAnchorTr;
                 if (_p2PlayerWebJoint != null) _p2Capsule.playerWebJoint = _p2PlayerWebJoint;
+                CacheP2WebSounds();
 
                 // WebController uses BodyMovement.Root and switches to BodyMovement.Ball in
                 // arachnophobia mode. Mirror that exact source transform for P2 so the
@@ -4347,7 +4569,14 @@ namespace AWJSplitScreen
                 // --- Drive native WebController via state-capsule swap ---
                 if (rtDown && _mShootWeb != null)
                 {
+                    bool hadWeb = _p2Capsule != null && _p2Capsule.webActive;
                     InvokeAsP2(() => _mShootWeb.Invoke(_p1WebController, new object[] { true }), setShootHeld: true);
+                    if (!hadWeb && _p2Capsule != null && _p2Capsule.webActive)
+                    {
+                        // The WebController call plays this too, but invoke it directly
+                        // on P2's relocated emitter as a reliable split-screen fallback.
+                        PlayP2GrappleSound();
+                    }
                 }
                 if (rtUp && _mShootWeb != null)
                 {
@@ -4825,6 +5054,9 @@ namespace AWJSplitScreen
                 UnityEngine.Object.Destroy(_webIndicatorLine.gameObject);
                 _webIndicatorLine = null;
             }
+            DestroyOwnedMaterial(ref _p2TargetDotMaterial);
+            DestroyOwnedMaterial(ref _p2AnchorDotMaterial);
+            DestroyOwnedMaterial(ref _grappleLineMaterial);
             _p1WebController = null;
             _p2Camera = null;
             _p2InputTransform = null;
@@ -4835,6 +5067,101 @@ namespace AWJSplitScreen
             SplitScreenMod.P2WebActive = false;
             SplitScreenMod.P2WebTargetActive = false;
             _inited = false;
+        }
+
+        private void CacheP2WebSounds()
+        {
+            if (_p2Capsule == null || _p2WebTargetTr == null) return;
+
+            try
+            {
+                Type webTargetType = AccessTools.TypeByName("_Scripts.Web.WebTarget");
+                Component webTarget = webTargetType == null ? null : _p2WebTargetTr.GetComponentInChildren(webTargetType, true) as Component;
+                if (webTarget == null) return;
+
+                const BindingFlags flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+                _p2Capsule.buildThreadSound = webTargetType.GetField("buildThreadSound", flags)?.GetValue(webTarget);
+                _p2Capsule.attachAnchorSound = webTargetType.GetField("attachAnchorSound", flags)?.GetValue(webTarget);
+                _p2Capsule.deleteThreadSound = webTargetType.GetField("deleteThreadSound", flags)?.GetValue(webTarget);
+                _p2Capsule.cantBuildSound = webTargetType.GetField("cantBuildSound", flags)?.GetValue(webTarget);
+                _p2Capsule.attachToPlayerSound = webTargetType.GetField("attachToPlayerSound", flags)?.GetValue(webTarget);
+                _p2Capsule.musicThreadSound = webTargetType.GetField("musicThreadSound", flags)?.GetValue(webTarget);
+                MoveP2WebSoundEmittersToPlayer();
+
+                if (_logger != null)
+                    _logger.Msg("[P2WebManager] Cached P2 web sound emitters: build=" + (_p2Capsule.buildThreadSound != null) + ", attach=" + (_p2Capsule.attachAnchorSound != null));
+            }
+            catch (Exception ex)
+            {
+                if (_logger != null) _logger.Warning("[P2WebManager] CacheP2WebSounds failed: " + ex.Message);
+            }
+        }
+
+        private void MoveP2WebSoundEmittersToPlayer()
+        {
+            if (_p2BodyMovement == null || _p2WebTargetTr == null) return;
+
+            object[] emitters =
+            {
+                _p2Capsule.buildThreadSound,
+                _p2Capsule.attachAnchorSound,
+                _p2Capsule.deleteThreadSound,
+                _p2Capsule.cantBuildSound,
+                _p2Capsule.attachToPlayerSound,
+                _p2Capsule.musicThreadSound
+            };
+            var moved = new HashSet<Component>();
+            foreach (object emitterObject in emitters)
+            {
+                Component emitter = emitterObject as Component;
+                if (emitter == null || !moved.Add(emitter)) continue;
+
+                // WebController's emitters are children of the target prefab. That
+                // target sits at the grapple point, which can be well beyond FMOD's
+                // attenuation range. Keep the event objects with P2 instead; their
+                // references remain valid when WebController calls Play().
+                if (emitter.transform != _p2WebTargetTr)
+                    emitter.transform.SetParent(_p2BodyMovement.transform, false);
+
+                // FMOD can select P1's listener in split-screen. Make the P2 web
+                // events audible from either listener while keeping their normal
+                // event content and volume.
+                Type emitterType = emitter.GetType();
+                emitterType.GetField("OverrideAttenuation", BindingFlags.Instance | BindingFlags.Public)?.SetValue(emitter, true);
+                emitterType.GetField("OverrideMinDistance", BindingFlags.Instance | BindingFlags.Public)?.SetValue(emitter, 0f);
+                emitterType.GetField("OverrideMaxDistance", BindingFlags.Instance | BindingFlags.Public)?.SetValue(emitter, 10000f);
+            }
+        }
+
+        private void PlayP2GrappleSound()
+        {
+            try
+            {
+                object emitterObject = string.Equals(_p2Capsule.webSound, "Music", StringComparison.Ordinal)
+                    ? _p2Capsule.musicThreadSound
+                    : _p2Capsule.buildThreadSound;
+                MethodInfo playMethod = emitterObject == null ? null : emitterObject.GetType().GetMethod("Play", BindingFlags.Instance | BindingFlags.Public);
+                if (playMethod != null)
+                {
+                    playMethod.Invoke(emitterObject, null);
+                    if (_logger != null) _logger.Msg("[P2WebManager] Played P2 grapple sound fallback.");
+                }
+                else if (_logger != null)
+                {
+                    _logger.Warning("[P2WebManager] P2 grapple sound emitter has no Play() method.");
+                }
+            }
+            catch (Exception ex)
+            {
+                if (_logger != null) _logger.Warning("[P2WebManager] P2 grapple sound fallback failed: " + ex.Message);
+            }
+        }
+
+        private static void DestroyOwnedMaterial(ref Material material)
+        {
+            if (material != null)
+                UnityEngine.Object.Destroy(material);
+            material = null;
         }
 
         private void OnDestroy()
@@ -4863,6 +5190,13 @@ namespace AWJSplitScreen
             public object playerWebJoint;
             public bool deleteWebPressed;
             public float deletePlayerWebsTimer;
+            public object buildThreadSound;
+            public object attachAnchorSound;
+            public object deleteThreadSound;
+            public object cantBuildSound;
+            public object attachToPlayerSound;
+            public object musicThreadSound;
+            public string webSound;
         }
 
         private static MethodInfo FindMethod_Bool(Type t, string name)
@@ -5280,18 +5614,344 @@ namespace AWJSplitScreen
         }
     }
 
+    internal static class CameraIsolationDiagnostics
+    {
+        private const float ActiveLogInterval = 0.25f;
+        private const float IdleLogInterval = 1.0f;
+        private static float _nextSampleTime;
+        private static float _lastP2LookTime = -999f;
+        private static Vector3 _lastP1Position;
+        private static Quaternion _lastP1Rotation;
+        private static bool _haveP1Pose;
+        private static int _lookCallbackCount;
+        private static int _blockedLookCallbackCount;
+        private static float _nextCallbackLogTime;
+        private static float _nextStageLogTime;
+
+        internal static void TraceP2CameraUpdate(Camera p1Camera, Vector3 before, string stage)
+        {
+            if (!SplitScreenMod.DebugSpeedLog || p1Camera == null) return;
+
+            Vector2 p2Stick = InputCompat.GetP2RightStick(SplitScreenMod.P2GamepadIndex, 0f);
+            if (p2Stick.magnitude < SplitScreenMod.P2Deadzone) return;
+
+            float now = Time.unscaledTime;
+            if (now < _nextStageLogTime) return;
+            _nextStageLogTime = now + ActiveLogInterval;
+
+            Vector3 after = p1Camera.transform.position;
+            MelonLogger.Msg("[CamDiag/Stage] frame=" + Time.frameCount +
+                " stage=" + stage + " p2Stick=" + Format(p2Stick) +
+                " p1Before=" + Format(before) + " p1After=" + Format(after) +
+                " immediateDelta=" + Vector3.Distance(before, after).ToString("F6"));
+        }
+
+        internal static void LogLookCallback(object instance, object context, Vector2 p2Stick, bool fromP2, bool blocked, Vector2 retainedBefore)
+        {
+            if (!SplitScreenMod.DebugSpeedLog) return;
+
+            _lookCallbackCount++;
+            if (blocked) _blockedLookCallbackCount++;
+            float now = Time.unscaledTime;
+            if (now < _nextCallbackLogTime) return;
+            _nextCallbackLogTime = now + 0.25f;
+
+            MelonLogger.Msg("[CamDiag/LookCallback] frame=" + Time.frameCount +
+                " owner=" + DescribeComponent(instance as Component) +
+                " ctx=" + InputCompat.DescribeCallbackContext(context) +
+                " p2Stick=" + Format(p2Stick) +
+                " retainedBefore=" + Format(retainedBefore) +
+                " fromP2=" + fromP2 + " blocked=" + blocked +
+                " totals=" + _lookCallbackCount + "/" + _blockedLookCallbackCount);
+        }
+
+        internal static void Sample(Camera p1Camera, Camera p2Camera)
+        {
+            if (!SplitScreenMod.DebugSpeedLog || !SplitScreenMod.IsSplitScreenActive || p1Camera == null)
+            {
+                _haveP1Pose = false;
+                return;
+            }
+
+            Vector2 p1Stick = InputCompat.GetP1RightStick(0f);
+            Vector2 p2Stick = InputCompat.GetP2RightStick(SplitScreenMod.P2GamepadIndex, 0f);
+            bool p2Active = p2Stick.magnitude >= SplitScreenMod.P2Deadzone;
+            float now = Time.unscaledTime;
+            if (p2Active) _lastP2LookTime = now;
+
+            Vector3 p1Position = p1Camera.transform.position;
+            Quaternion p1Rotation = p1Camera.transform.rotation;
+            GameObject p1Spider = GameObject.Find("PlayerSpider");
+            GameObject p2Spider = GameObject.Find("PlayerSpider_P2");
+            float positionDelta = _haveP1Pose ? Vector3.Distance(_lastP1Position, p1Position) : 0f;
+            float rotationDelta = _haveP1Pose ? Quaternion.Angle(_lastP1Rotation, p1Rotation) : 0f;
+            _lastP1Position = p1Position;
+            _lastP1Rotation = p1Rotation;
+            _haveP1Pose = true;
+
+            bool recentlyActive = now - _lastP2LookTime < 1.0f;
+            bool p1Moved = positionDelta > 0.0005f || rotationDelta > 0.005f;
+            float interval = recentlyActive ? ActiveLogInterval : IdleLogInterval;
+            if (now < _nextSampleTime || (!recentlyActive && !p1Moved)) return;
+            _nextSampleTime = now + interval;
+
+            MelonLogger.Msg("[CamDiag/Pose] frame=" + Time.frameCount +
+                " p2Index=" + SplitScreenMod.P2GamepadIndex +
+                " pads=" + InputCompat.GetConnectedGamepadCount() +
+                " p1Stick=" + Format(p1Stick) + " p2Stick=" + Format(p2Stick) +
+                " p2Active=" + p2Active +
+                " | p1Pos=" + Format(p1Position) + " dPos=" + positionDelta.ToString("F4") +
+                " p1Rot=" + Format(p1Rotation.eulerAngles) + " dRot=" + rotationDelta.ToString("F3") +
+                " p1Parent=" + DescribeTransform(p1Camera.transform.parent) +
+                " p1Spider=" + (p1Spider == null ? "null" : Format(p1Spider.transform.position)) +
+                " p1SpiderRot=" + (p1Spider == null ? "null" : Format(p1Spider.transform.eulerAngles)) +
+                " | p2Pos=" + (p2Camera == null ? "null" : Format(p2Camera.transform.position)) +
+                " p2Rot=" + (p2Camera == null ? "null" : Format(p2Camera.transform.rotation.eulerAngles)) +
+                " p2Spider=" + (p2Spider == null ? "null" : Format(p2Spider.transform.position)) +
+                " p2SpiderRot=" + (p2Spider == null ? "null" : Format(p2Spider.transform.eulerAngles)));
+
+            DumpCameraDrivers();
+            DumpCinemachineState();
+        }
+
+        private static void DumpCameraDrivers()
+        {
+            try
+            {
+                Type lookType = AccessTools.TypeByName("_Scripts.Camera.CameraMouseLook");
+                if (lookType != null)
+                {
+                    const BindingFlags F = BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public;
+                    FieldInfo lookInput = lookType.GetField("lookInput", F);
+                    FieldInfo mouseLook = lookType.GetField("mouseLook", F);
+                    FieldInfo yawTransform = lookType.GetField("yawTransform", F);
+                    UnityEngine.Object[] looks = UnityEngine.Object.FindObjectsOfType(lookType, true);
+                    for (int i = 0; looks != null && i < looks.Length; i++)
+                    {
+                        Component component = looks[i] as Component;
+                        Transform yaw = yawTransform == null ? null : yawTransform.GetValue(looks[i]) as Transform;
+                        MelonLogger.Msg("[CamDiag/Driver] look#" + i + "=" + DescribeComponent(component) +
+                            " enabled=" + DescribeEnabled(looks[i]) +
+                            " lookInput=" + FormatObjectVector2(lookInput == null ? null : lookInput.GetValue(looks[i])) +
+                            " mouseLook=" + FormatObjectVector2(mouseLook == null ? null : mouseLook.GetValue(looks[i])) +
+                            " localRot=" + (component == null ? "null" : Format(component.transform.localEulerAngles)) +
+                            " yaw=" + DescribeTransform(yaw) +
+                            " yawLocalRot=" + (yaw == null ? "null" : Format(yaw.localEulerAngles)));
+                    }
+                }
+
+                Type zoomType = AccessTools.TypeByName("_Scripts.Camera.CameraZoom");
+                if (zoomType != null)
+                {
+                    const BindingFlags F = BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public;
+                    FieldInfo zoom = zoomType.GetField("zoom", F);
+                    FieldInfo cameraDistance = zoomType.GetField("cameraDistance", F);
+                    FieldInfo finalDistance = zoomType.GetField("finalCameraDistance", F);
+                    UnityEngine.Object[] zooms = UnityEngine.Object.FindObjectsOfType(zoomType, true);
+                    for (int i = 0; zooms != null && i < zooms.Length; i++)
+                    {
+                        Component component = zooms[i] as Component;
+                        MelonLogger.Msg("[CamDiag/Zoom] zoom#" + i + "=" + DescribeComponent(component) +
+                            " enabled=" + DescribeEnabled(zooms[i]) +
+                            " zoom=" + FormatObjectFloat(zoom == null ? null : zoom.GetValue(zooms[i])) +
+                            " smoothed=" + FormatObjectFloat(cameraDistance == null ? null : cameraDistance.GetValue(zooms[i])) +
+                            " final=" + FormatObjectFloat(finalDistance == null ? null : finalDistance.GetValue(zooms[i])) +
+                            " forward=" + (component == null ? "null" : Format(component.transform.forward)));
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                MelonLogger.Warning("[CamDiag] driver inspection failed: " + ex.Message);
+            }
+        }
+
+        private static void DumpCinemachineState()
+        {
+            try
+            {
+                const BindingFlags F = BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public;
+                Type controllerType = AccessTools.TypeByName("_Scripts.Singletons.CameraController");
+                if (controllerType == null) return;
+
+                UnityEngine.Object[] controllers = UnityEngine.Object.FindObjectsOfType(controllerType, true);
+                if (controllers == null || controllers.Length == 0) return;
+                object controller = controllers[0];
+
+                FieldInfo mainCameraField = controllerType.GetField("mainCamera", F);
+                FieldInfo shoulderField = controllerType.GetField("shoulderOffset", F);
+                FieldInfo inputField = controllerType.GetField("inputTransform", F);
+                FieldInfo targetField = controllerType.GetField("followCameraFollowTarget", F);
+                FieldInfo vcamField = controllerType.GetField("cinemachineFollowCamera", F);
+
+                Camera mainCamera = mainCameraField == null ? null : mainCameraField.GetValue(controller) as Camera;
+                Transform input = inputField == null ? null : inputField.GetValue(controller) as Transform;
+                Component followTarget = targetField == null ? null : targetField.GetValue(controller) as Component;
+                Component vcam = vcamField == null ? null : vcamField.GetValue(controller) as Component;
+                Transform followedTransform = null;
+                if (followTarget != null)
+                {
+                    FieldInfo followedField = AccessTools.Field(followTarget.GetType(), "target");
+                    followedTransform = followedField == null ? null : followedField.GetValue(followTarget) as Transform;
+                }
+
+                MelonLogger.Msg("[CamDiag/Controller] main=" + DescribeComponent(mainCamera) +
+                    " shoulder=" + FormatObjectVector3(shoulderField == null ? null : shoulderField.GetValue(controller)) +
+                    " input=" + DescribeTransform(input) +
+                    " followTarget=" + DescribeComponent(followTarget) +
+                    " followTargetPos=" + (followTarget == null ? "null" : Format(followTarget.transform.position)) +
+                    " followTargetRot=" + (followTarget == null ? "null" : Format(followTarget.transform.eulerAngles)) +
+                    " followed=" + DescribeTransform(followedTransform) +
+                    " followedPos=" + (followedTransform == null ? "null" : Format(followedTransform.position)) +
+                    " followedRot=" + (followedTransform == null ? "null" : Format(followedTransform.eulerAngles)) +
+                    " vcam=" + DescribeComponent(vcam) +
+                    " vcamPos=" + (vcam == null ? "null" : Format(vcam.transform.position)) +
+                    " vcamRot=" + (vcam == null ? "null" : Format(vcam.transform.eulerAngles)));
+
+                if (vcam == null) return;
+                Type followType = AccessTools.TypeByName("Cinemachine.Cinemachine3rdPersonFollow");
+                if (followType == null) return;
+
+                MethodInfo getter = null;
+                MethodInfo[] methods = vcam.GetType().GetMethods(BindingFlags.Instance | BindingFlags.Public);
+                for (int i = 0; i < methods.Length; i++)
+                {
+                    MethodInfo method = methods[i];
+                    if (method.Name == "GetCinemachineComponent" && method.IsGenericMethodDefinition &&
+                        method.GetParameters().Length == 0)
+                    {
+                        getter = method;
+                        break;
+                    }
+                }
+                if (getter == null) return;
+
+                object follow = getter.MakeGenericMethod(followType).Invoke(vcam, null);
+                if (follow == null) return;
+
+                MelonLogger.Msg("[CamDiag/Follow] shoulder=" + ReadVector3(followType, follow, "ShoulderOffset") +
+                    " verticalArm=" + ReadFloat(followType, follow, "VerticalArmLength") +
+                    " side=" + ReadFloat(followType, follow, "CameraSide") +
+                    " distance=" + ReadFloat(followType, follow, "CameraDistance") +
+                    " damping=" + ReadVector3(followType, follow, "Damping") +
+                    " previousTarget=" + ReadVector3(followType, follow, "m_PreviousFollowTargetPosition") +
+                    " dampingCorrection=" + ReadVector3(followType, follow, "m_DampingCorrection") +
+                    " collisionCorrection=" + ReadVector3(followType, follow, "m_CamPosCollisionCorrection"));
+
+                DumpBodyTarget("P1", SplitScreenMod.P1BodyMovementInstance);
+                DumpBodyTarget("P2", SplitScreenMod.P2BodyMovementInstance);
+            }
+            catch (Exception ex)
+            {
+                MelonLogger.Warning("[CamDiag] Cinemachine inspection failed: " + ex.Message);
+            }
+        }
+
+        private static void DumpBodyTarget(string player, Component body)
+        {
+            if (body == null) return;
+            FieldInfo targetField = AccessTools.Field(body.GetType(), "targetTransform");
+            Transform target = targetField == null ? null : targetField.GetValue(body) as Transform;
+            MelonLogger.Msg("[CamDiag/Body] player=" + player +
+                " body=" + DescribeComponent(body) +
+                " bodyPos=" + Format(body.transform.position) +
+                " bodyRot=" + Format(body.transform.eulerAngles) +
+                " target=" + DescribeTransform(target) +
+                " targetPos=" + (target == null ? "null" : Format(target.position)) +
+                " targetRot=" + (target == null ? "null" : Format(target.eulerAngles)));
+        }
+
+        private static string ReadVector3(Type type, object instance, string fieldName)
+        {
+            FieldInfo field = AccessTools.Field(type, fieldName);
+            return field == null ? "?" : FormatObjectVector3(field.GetValue(instance));
+        }
+
+        private static string ReadFloat(Type type, object instance, string fieldName)
+        {
+            FieldInfo field = AccessTools.Field(type, fieldName);
+            return field == null ? "?" : FormatObjectFloat(field.GetValue(instance));
+        }
+
+        private static string DescribeEnabled(object value)
+        {
+            Behaviour behaviour = value as Behaviour;
+            return behaviour == null ? "n/a" : (behaviour.enabled ? "ON" : "OFF");
+        }
+
+        private static string DescribeComponent(Component component)
+        {
+            return component == null ? "null" : component.GetType().FullName + "@" + DescribeTransform(component.transform);
+        }
+
+        private static string DescribeTransform(Transform transform)
+        {
+            if (transform == null) return "null";
+            string path = transform.name;
+            Transform parent = transform.parent;
+            int depth = 0;
+            while (parent != null && depth++ < 6)
+            {
+                path = parent.name + "/" + path;
+                parent = parent.parent;
+            }
+            return path + "#" + transform.GetInstanceID();
+        }
+
+        private static string Format(Vector2 value) { return "(" + value.x.ToString("F3") + "," + value.y.ToString("F3") + ")"; }
+        private static string Format(Vector3 value) { return "(" + value.x.ToString("F3") + "," + value.y.ToString("F3") + "," + value.z.ToString("F3") + ")"; }
+        private static string FormatObjectVector2(object value) { return value is Vector2 ? Format((Vector2)value) : "?"; }
+        private static string FormatObjectVector3(object value) { return value is Vector3 ? Format((Vector3)value) : "?"; }
+        private static string FormatObjectFloat(object value) { return value is float ? ((float)value).ToString("F3") : "?"; }
+    }
+
     internal static class CameraMouseLookPatches
     {
-        public static bool OnLook_Prefix(object __0)
+        private static FieldInfo _lookInputField;
+
+        public static bool OnLook_Prefix(object __instance, object __0)
         {
+            if (!SplitScreenMod.IsSplitScreenActive) return true;
             if (!SplitScreenMod.FilterP1FromP2Gamepad) return true;
             if (!SplitScreenMod.P2UseGamepad) return true;
 
-            // Only block if the callback itself can be proven to originate from P2's gamepad.
-            // The old "P2 stick is active, so suppress P1" heuristic caused false positives
-            // when P1 was using mouse/keyboard while P2 moved the right stick.
-            if (InputCompat.IsCallbackContextFromP2Gamepad(__0, SplitScreenMod.P2GamepadIndex))
+            // Composite bindings in newer game builds do not always expose the originating
+            // device through CallbackContext. Fall back to the dedicated P2 stick that drives
+            // our camera rig so a missing device does not leak P2 look into P1.
+            Vector2 retainedBefore = Vector2.zero;
+            try
+            {
+                if (_lookInputField == null && __instance != null)
+                    _lookInputField = AccessTools.Field(__instance.GetType(), "lookInput");
+                if (_lookInputField != null && _lookInputField.GetValue(__instance) is Vector2)
+                    retainedBefore = (Vector2)_lookInputField.GetValue(__instance);
+            }
+            catch { }
+
+            bool fromP2 = InputCompat.IsCallbackContextFromP2Gamepad(__0, SplitScreenMod.P2GamepadIndex);
+            Vector2 p2Look = InputCompat.GetP2RightStick(SplitScreenMod.P2GamepadIndex, SplitScreenMod.P2Deadzone);
+            if (!fromP2)
+            {
+                fromP2 = p2Look.sqrMagnitude > 0f;
+            }
+
+            CameraIsolationDiagnostics.LogLookCallback(__instance, __0, p2Look, fromP2, fromP2, retainedBefore);
+
+            if (fromP2)
+            {
+                // CameraMouseLook keeps its last performed value and applies it every Update.
+                // Clear it as well as skipping this callback, otherwise one leaked sample can
+                // continue nudging P1 after P2 releases the stick.
+                try
+                {
+                    if (_lookInputField == null && __instance != null)
+                        _lookInputField = AccessTools.Field(__instance.GetType(), "lookInput");
+                    if (_lookInputField != null)
+                        _lookInputField.SetValue(__instance, Vector2.zero);
+                }
+                catch { }
                 return false;
+            }
 
             return true;
         }
@@ -5301,10 +5961,14 @@ namespace AWJSplitScreen
     {
         public static bool OnZoom_Prefix(object __0)
         {
+            if (!SplitScreenMod.IsSplitScreenActive) return true;
             if (!SplitScreenMod.FilterP1FromP2Gamepad) return true;
             if (!SplitScreenMod.P2UseGamepad) return true;
 
-            if (InputCompat.IsCallbackContextFromP2Gamepad(__0, SplitScreenMod.P2GamepadIndex))
+            // Prefer callback ownership, with a polling fallback for composite bindings that
+            // report the shared action rather than P2's actual device.
+            if (InputCompat.IsCallbackContextFromP2Gamepad(__0, SplitScreenMod.P2GamepadIndex) ||
+                InputCompat.IsP2CameraZoomPressedNow(true, SplitScreenMod.P2GamepadIndex))
                 return false;
 
             return true;
@@ -5672,6 +6336,7 @@ namespace AWJSplitScreen
 
         public static bool CallbackContextFilter_Prefix(object __instance, ref UnityEngine.InputSystem.InputAction.CallbackContext __0)
         {
+            if (!SplitScreenMod.IsSplitScreenActive) return true;
             // P2 movement, jump and sprint are all driven by the dedicated polling
             // path. Letting the cloned BodyMovement also consume the shared game's
             // callbacks makes P1's controls act on P2 and can apply jump input twice.
@@ -5959,6 +6624,7 @@ namespace AWJSplitScreen
 
         public static bool CallbackContextFilter_Prefix(object __instance, ref UnityEngine.InputSystem.InputAction.CallbackContext __0)
         {
+            if (!SplitScreenMod.IsSplitScreenActive) return true;
             if (!SplitScreenMod.FilterP1FromP2Gamepad) return true;
             if (!SplitScreenMod.P2UseGamepad) return true;
 
@@ -6017,6 +6683,7 @@ namespace AWJSplitScreen
     {
         public static bool CallbackContextFilter_Prefix(ref UnityEngine.InputSystem.InputAction.CallbackContext __0)
         {
+            if (!SplitScreenMod.IsSplitScreenActive) return true;
             if (!SplitScreenMod.FilterP1FromP2Gamepad) return true;
             if (!SplitScreenMod.P2UseGamepad) return true;
 
@@ -6604,6 +7271,7 @@ namespace AWJSplitScreen
         private static Type _cachedMovableObjectType;
         private static FieldInfo _collidersField;
         private static int _p2Layer = int.MinValue;
+        private static readonly Dictionary<Collider, int> _originalExcludeMasks = new Dictionary<Collider, int>();
 
         private static int GetP2ExcludeMask()
         {
@@ -6652,11 +7320,21 @@ namespace AWJSplitScreen
                     if (collider == null)
                         continue;
 
-                    int excludeMask = collider.excludeLayers.value;
-                    excludeMask = exclude
-                        ? (excludeMask | p2ExcludeMask)
-                        : (excludeMask & ~p2ExcludeMask);
-                    collider.excludeLayers = excludeMask;
+                    if (exclude)
+                    {
+                        if (!_originalExcludeMasks.ContainsKey(collider))
+                            _originalExcludeMasks.Add(collider, collider.excludeLayers.value);
+                        collider.excludeLayers = collider.excludeLayers | p2ExcludeMask;
+                    }
+                    else
+                    {
+                        int originalMask;
+                        if (_originalExcludeMasks.TryGetValue(collider, out originalMask))
+                        {
+                            collider.excludeLayers = originalMask;
+                            _originalExcludeMasks.Remove(collider);
+                        }
+                    }
                 }
             }
             catch
@@ -6686,7 +7364,12 @@ namespace AWJSplitScreen
 
         public static void Reset()
         {
-            ApplyP2CollisionExclusion(_trackedMovableObject, false);
+            foreach (var pair in _originalExcludeMasks)
+            {
+                if (pair.Key != null)
+                    pair.Key.excludeLayers = pair.Value;
+            }
+            _originalExcludeMasks.Clear();
             _trackedMovableObject = null;
         }
     }
@@ -7484,6 +8167,73 @@ namespace AWJSplitScreen
                 return false;
             }
         }
+
+        public static string DescribeCallbackContext(object ctx)
+        {
+            try
+            {
+                if (ctx == null) return "null";
+
+                PropertyInfo ctxControlProp = _ctxControlProp;
+                if (ctxControlProp == null || !ctxControlProp.DeclaringType.IsAssignableFrom(ctx.GetType()))
+                    ctxControlProp = ctx.GetType().GetProperty("control", BindingFlags.Public | BindingFlags.Instance);
+                object control = ctxControlProp == null ? null : ctxControlProp.GetValue(ctx, null);
+                if (control == null) return ctx.GetType().FullName + " control=null";
+
+                PropertyInfo controlDeviceProp = _controlDeviceProp;
+                if (controlDeviceProp == null || !controlDeviceProp.DeclaringType.IsAssignableFrom(control.GetType()))
+                    controlDeviceProp = control.GetType().GetProperty("device", BindingFlags.Public | BindingFlags.Instance);
+                object device = controlDeviceProp == null ? null : controlDeviceProp.GetValue(control, null);
+
+                string controlPath = ReadStringProperty(control, "path");
+                string controlName = ReadStringProperty(control, "name");
+                string deviceName = device == null ? "null" : ReadStringProperty(device, "displayName");
+                int deviceId;
+                string id = TryReadDeviceId(device, out deviceId) ? deviceId.ToString() : "?";
+                string value = TryReadContextVector2(ctx);
+
+                return "control=" + controlName + " path=" + controlPath +
+                    " device=" + deviceName + "#" + id + " value=" + value;
+            }
+            catch (Exception ex)
+            {
+                return "error:" + ex.GetType().Name + ":" + ex.Message;
+            }
+        }
+
+        private static string ReadStringProperty(object instance, string propertyName)
+        {
+            if (instance == null) return "null";
+            try
+            {
+                PropertyInfo property = instance.GetType().GetProperty(propertyName, BindingFlags.Public | BindingFlags.Instance);
+                object value = property == null ? null : property.GetValue(instance, null);
+                return value == null ? "?" : value.ToString();
+            }
+            catch { return "?"; }
+        }
+
+        private static string TryReadContextVector2(object ctx)
+        {
+            try
+            {
+                MethodInfo[] methods = ctx.GetType().GetMethods(BindingFlags.Public | BindingFlags.Instance);
+                for (int i = 0; i < methods.Length; i++)
+                {
+                    MethodInfo method = methods[i];
+                    if (method.Name != "ReadValue" || !method.IsGenericMethodDefinition || method.GetParameters().Length != 0)
+                        continue;
+                    object value = method.MakeGenericMethod(typeof(Vector2)).Invoke(ctx, null);
+                    if (value is Vector2)
+                    {
+                        Vector2 vector = (Vector2)value;
+                        return "(" + vector.x.ToString("F3") + "," + vector.y.ToString("F3") + ")";
+                    }
+                }
+            }
+            catch { }
+            return "?";
+        }
     }
 
     internal static class CameraWaterTriggerPatches
@@ -7497,7 +8247,7 @@ namespace AWJSplitScreen
                 if (profilesField != null)
                 {
                     var profiles = profilesField.GetValue(__instance) as UnityEngine.Rendering.VolumeProfile[];
-                    if (profiles != null && profiles.Length > 0 && SplitScreenMod.TrackedWaterProfiles == null)
+                    if (profiles != null && profiles.Length > 0)
                     {
                         SplitScreenMod.TrackedWaterProfiles = profiles;
                     }
@@ -7512,8 +8262,8 @@ namespace AWJSplitScreen
             if (p2Bm != null)
             {
                 var p2Cam = SplitScreenMod.P2Camera;
-                var cam = (__instance as UnityEngine.Component).gameObject;
-                if (cam == p2Cam)
+                var trigger = __instance as UnityEngine.Component;
+                if (trigger != null && p2Cam != null && trigger.gameObject == p2Cam.gameObject)
                 {
                     SplitScreenMod.P2CameraUnderwater = value;
                     return false;
