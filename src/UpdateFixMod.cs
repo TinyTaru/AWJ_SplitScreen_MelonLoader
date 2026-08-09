@@ -58,8 +58,11 @@ namespace AWJSplitScreenUpdateFix
         private static PropertyInfo bodyStateProperty;
         private static Type webControllerType;
         private static FieldInfo webActiveField;
+        private static FieldInfo webSpringJointField;
+        private static FieldInfo webBodyMovementField;
         private static Component webControllerInstance;
         private static FieldInfo p2WebActiveField;
+        private static Transform p2AirInputProxy;
         private static float lastP2AirDiagnosticTime = -999f;
         private static int p2BodyUpdateCount;
         private static int p2BodyFixedUpdateCount;
@@ -71,6 +74,7 @@ namespace AWJSplitScreenUpdateFix
         private static int lastFrameDiagnosticP2Renders;
         private static int lastFrameDiagnosticP1Renders;
         private static float lastFrameDiagnosticTime = -999f;
+        private static float lastSharedPhysicsDiagnosticTime = -999f;
         private static readonly List<Material> p2ShellMaterials = new List<Material>();
         private static int preparedP2Id;
         private static int preparedP2WindId;
@@ -109,6 +113,8 @@ namespace AWJSplitScreenUpdateFix
             bodyStateProperty = bodyMovementType.GetProperty("State", flags);
             webControllerType = AccessTools.TypeByName("_Scripts.Singletons.WebController");
             webActiveField = webControllerType == null ? null : webControllerType.GetField("webActive", flags);
+            webSpringJointField = webControllerType == null ? null : webControllerType.GetField("springJoint", flags);
+            webBodyMovementField = webControllerType == null ? null : webControllerType.GetField("bodyMovement", flags);
 
             windParticleSystemType = AccessTools.TypeByName("_Scripts.Effects.WindParticleSystem");
             if (windParticleSystemType != null)
@@ -239,6 +245,7 @@ namespace AWJSplitScreenUpdateFix
             EnsureP2WindTrail();
             UpdateP2ShellMaterialPosition();
             LogP2FrameCadence();
+            LogSharedPhysicsState();
         }
 
         internal static void LateUpdate()
@@ -249,6 +256,11 @@ namespace AWJSplitScreenUpdateFix
         internal static void Deinitialize()
         {
             RenderPipelineManager.beginCameraRendering -= OnBeginCameraRendering;
+            if (p2AirInputProxy != null)
+            {
+                UnityEngine.Object.Destroy(p2AirInputProxy.gameObject);
+                p2AirInputProxy = null;
+            }
         }
 
         private static void AlignP2CameraWithSmoothedSpider()
@@ -403,6 +415,71 @@ namespace AWJSplitScreenUpdateFix
             }
         }
 
+        private static void LogSharedPhysicsState()
+        {
+            try
+            {
+                if (Time.unscaledTime - lastSharedPhysicsDiagnosticTime < 0.5f || bodyMovementType == null)
+                    return;
+
+                GameObject p1Object = GameObject.Find("PlayerSpider");
+                GameObject p2Object = GameObject.Find("PlayerSpider_P2");
+                Component p1Body = p1Object == null ? null : p1Object.GetComponentInChildren(bodyMovementType, true);
+                Component p2Body = p2Object == null ? null : p2Object.GetComponentInChildren(bodyMovementType, true);
+                string p1State = p1Body == null || bodyStateProperty == null ? "?" : Convert.ToString(bodyStateProperty.GetValue(p1Body, null));
+                string p2State = p2Body == null || bodyStateProperty == null ? "-" : Convert.ToString(bodyStateProperty.GetValue(p2Body, null));
+
+                if (webControllerInstance == null && webControllerType != null)
+                    webControllerInstance = UnityEngine.Object.FindObjectOfType(webControllerType) as Component;
+
+                bool p1WebActive = webControllerInstance != null && webActiveField != null && webActiveField.GetValue(webControllerInstance) is bool active && active;
+                bool p2WebActive = ReadStaticBool(p2WebActiveField);
+                if (!string.Equals(p1State, "Jumping", StringComparison.Ordinal) &&
+                    !string.Equals(p2State, "Jumping", StringComparison.Ordinal) &&
+                    !p1WebActive && !p2WebActive)
+                    return;
+
+                lastSharedPhysicsDiagnosticTime = Time.unscaledTime;
+                Rigidbody p1Rb = p1Body == null || rigidbodyField == null ? null : rigidbodyField.GetValue(p1Body) as Rigidbody;
+                Rigidbody p2Rb = p2Body == null || rigidbodyField == null ? null : rigidbodyField.GetValue(p2Body) as Rigidbody;
+                object liveJointObject = webControllerInstance == null || webSpringJointField == null ? null : webSpringJointField.GetValue(webControllerInstance);
+                SpringJoint liveJoint = liveJointObject as SpringJoint;
+                object liveBody = webControllerInstance == null || webBodyMovementField == null ? null : webBodyMovementField.GetValue(webControllerInstance);
+
+                int jointsToP1 = 0;
+                int jointsToP2 = 0;
+                int totalJoints = 0;
+                SpringJoint[] joints = UnityEngine.Object.FindObjectsOfType<SpringJoint>(true);
+                if (joints != null)
+                {
+                    totalJoints = joints.Length;
+                    for (int i = 0; i < joints.Length; i++)
+                    {
+                        SpringJoint joint = joints[i];
+                        if (joint == null) continue;
+                        if (p1Rb != null && joint.connectedBody == p1Rb) jointsToP1++;
+                        if (p2Rb != null && joint.connectedBody == p2Rb) jointsToP2++;
+                    }
+                }
+
+                MelonLogger.Msg("[SharedPhysicsDiag] gravity=" + Physics.gravity.ToString("F2") +
+                    " timeScale=" + Time.timeScale.ToString("F2") +
+                    " | P1 state=" + p1State + " web=" + p1WebActive +
+                    " vel=" + (p1Rb == null ? "?" : p1Rb.linearVelocity.ToString("F2")) +
+                    " grav=" + (p1Rb != null && p1Rb.useGravity) +
+                    " | P2 state=" + p2State + " web=" + p2WebActive +
+                    " vel=" + (p2Rb == null ? "-" : p2Rb.linearVelocity.ToString("F2")) +
+                    " grav=" + (p2Rb != null && p2Rb.useGravity) +
+                    " | liveWebBody=" + (ReferenceEquals(liveBody, p1Body) ? "P1" : ReferenceEquals(liveBody, p2Body) ? "P2" : "other") +
+                    " liveJoint=" + (liveJoint == null ? "null" : liveJoint.name + "->" + (liveJoint.connectedBody == null ? "null" : liveJoint.connectedBody.name)) +
+                    " joints(total/toP1/toP2)=" + totalJoints + "/" + jointsToP1 + "/" + jointsToP2);
+            }
+            catch (Exception exception)
+            {
+                MelonLogger.Warning("[SharedPhysicsDiag] failed: " + exception.Message);
+            }
+        }
+
         public static bool CameraMouseLookOnLookPrefix(object __0)
         {
             if (!ReadStaticBool(p2UseGamepadField))
@@ -494,7 +571,7 @@ namespace AWJSplitScreenUpdateFix
             JumpContext state = new JumpContext();
             try
             {
-                Transform inputTransform = p2InputTransformField == null ? null : p2InputTransformField.GetValue(null) as Transform;
+                Transform inputTransform = GetP2AirInputTransform(__instance);
                 if (cameraControllerType != null && cameraInputTransformField != null && inputTransform != null)
                 {
                     state.CameraController = UnityEngine.Object.FindObjectOfType(cameraControllerType);
@@ -537,6 +614,31 @@ namespace AWJSplitScreenUpdateFix
                 RestoreJumpContext(__instance, state);
                 MelonLogger.Warning("[UpdateFix] Could not prepare P2's updated jump routine: " + exception.Message);
             }
+        }
+
+        private static Transform GetP2AirInputTransform(object instance)
+        {
+            Transform source = p2InputTransformField == null ? null : p2InputTransformField.GetValue(null) as Transform;
+            Camera p2Camera = p2CameraField == null ? null : p2CameraField.GetValue(null) as Camera;
+            Vector3 forward = p2Camera != null ? p2Camera.transform.forward : source != null ? source.forward : Vector3.forward;
+            forward = Vector3.ProjectOnPlane(forward, Vector3.up);
+
+            Component body = instance as Component;
+            if (forward.sqrMagnitude < 0.0001f && body != null)
+                forward = Vector3.ProjectOnPlane(body.transform.forward, Vector3.up);
+            if (forward.sqrMagnitude < 0.0001f)
+                forward = Vector3.forward;
+
+            if (p2AirInputProxy == null)
+            {
+                GameObject proxyObject = new GameObject("AWJ_P2AirInputProxy");
+                proxyObject.hideFlags = HideFlags.HideAndDontSave;
+                p2AirInputProxy = proxyObject.transform;
+            }
+
+            p2AirInputProxy.position = body != null ? body.transform.position : source != null ? source.position : Vector3.zero;
+            p2AirInputProxy.rotation = Quaternion.LookRotation(forward.normalized, Vector3.up);
+            return p2AirInputProxy;
         }
 
         private static void BodyMovementPerformJumpingPostfix(object __instance, JumpContext __state)

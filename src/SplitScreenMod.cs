@@ -90,6 +90,7 @@ namespace AWJSplitScreen
         private GameObject _p1Spider;
         internal static GameObject _p2Spider;
         private Transform _p1InputTransform;
+        private readonly List<ReanchoredTransformParent> _p1CloneReanchors = new List<ReanchoredTransformParent>();
 
         private Vector3 _p2CamDir;        // direction from pivot to camera (normalized, derived from yaw/pitch)
         private Vector3 _p2SmoothUp;      // smoothed spider surface up (lerped each frame)
@@ -156,6 +157,12 @@ namespace AWJSplitScreen
         private P2WebManager _p2WebManager;
         private Component _p2SpiderInteraction;
         private MethodInfo _p2SpiderMobileInteractMethod;
+        private MethodInfo _p1MobileShootWebMethod;
+        private FieldInfo _p1WebActiveField;
+        private FieldInfo _p1SpringJointField;
+        private MethodInfo _p1DeactivateSpringJointMethod;
+        private MethodInfo _p1ReleaseWebMethod;
+        private bool _p1ShootHeldPrev;
 
         internal static bool IsSplitScreenActive
         {
@@ -1103,6 +1110,9 @@ namespace AWJSplitScreen
                 }
 
                 // Drive P2's independent web system
+                RepairP1WebState();
+                DriveP1ShootFallback();
+
                 if (_p2WebManager != null)
                     _p2WebManager.DriveInput();
             }
@@ -1465,9 +1475,26 @@ namespace AWJSplitScreen
             // each pulling the other toward themselves whenever they moved.
             // P1's spider is mid-air → targetTransform.parent == P1.transform → safe to clone.
             // P1's spider is grounded → targetTransform.parent == surface → must re-anchor.
-            ReanchorSharedTargets(_p1Spider);
+            _p1CloneReanchors.Clear();
+            ReanchorSharedTargets(_p1Spider, _p1CloneReanchors);
+            try
+            {
+                _p2Spider = UnityEngine.Object.Instantiate(_p1Spider);
+            }
+            finally
+            {
+                // Reanchoring is only needed for the instant of cloning.  Leaving P1's
+                // walking target under the spider changes the game's ground-following
+                // physics and persists even after split-screen is disabled.
+                RestoreReanchoredTargets(_p1CloneReanchors);
+                _p1CloneReanchors.Clear();
+            }
 
-            _p2Spider = UnityEngine.Object.Instantiate(_p1Spider);
+            if (_p2Spider == null)
+            {
+                LoggerInstance.Warning("Couldn't clone PlayerSpider for P2.");
+                return;
+            }
             _p2Spider.name = _p1Spider.name + "_P2";
             _p2Spider.transform.position += new Vector3(3f, 0f, 3f);
 
@@ -2808,12 +2835,116 @@ namespace AWJSplitScreen
         // (BodyMovement.targetTransform, LegController.targetLocal) back into the spider
         // hierarchy so Instantiate deep-copies them instead of leaving the clone pointing
         // at P1's instance. Without this, P1 and P2 share a movement target while grounded.
-        private static void ReanchorSharedTargets(GameObject p1Spider)
+        private sealed class ReanchoredTransformParent
         {
-            if (p1Spider == null) return;
+            public Transform Transform;
+            public Transform Parent;
+            public int SiblingIndex;
+        }
+
+        // The game's shoot InputAction is shared by every gamepad. If P2 holds RT,
+        // Input System can leave that action in Performed and P1's next RT press does
+        // not produce a new callback. Poll P1's own pad and invoke the mobile path only
+        // when the native callback did not already change the live P1 web state.
+        private void DriveP1ShootFallback()
+        {
+            bool held = InputCompat.IsP1ShootRTHeldNow(P2GamepadIndex, P2TriggerThreshold);
+            bool down = held && !_p1ShootHeldPrev;
+            bool up = !held && _p1ShootHeldPrev;
+            _p1ShootHeldPrev = held;
+
+            if ((!down && !up) || _webController == null || InP2WebContext)
+                return;
+
             try
             {
-                ReanchorField(p1Spider, "_Scripts.Spider.BodyMovement", "targetTransform");
+                var webType = _webController.GetType();
+                if (_p1MobileShootWebMethod == null)
+                    _p1MobileShootWebMethod = webType.GetMethod("MobileShootWeb",
+                        BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+                        null, new[] { typeof(bool) }, null);
+                if (_p1WebActiveField == null)
+                    _p1WebActiveField = webType.GetField("webActive",
+                        BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+
+                if (_p1MobileShootWebMethod == null || _p1WebActiveField == null)
+                    return;
+
+                bool webActive = (bool)_p1WebActiveField.GetValue(_webController);
+                if ((down && !webActive) || (up && webActive))
+                {
+                    _p1MobileShootWebMethod.Invoke(_webController, new object[] { down });
+                    LoggerInstance.Msg("[P1WebFallback] Recovered a missed P1 " + (down ? "grapple press." : "grapple release."));
+                }
+            }
+            catch (Exception ex)
+            {
+                LoggerInstance.Warning("[P1WebFallback] Failed: " + ex.Message);
+            }
+        }
+
+        // The P2 state capsule can expose a bad vanilla invariant: WebController says
+        // P1's web is inactive while its old SpringJoint is still alive. Vanilla's next
+        // AttachWeb then fails because ActivateSpringJoint refuses to create a second
+        // joint. The orphan also continues participating in physics. Repair the live P1
+        // state before processing either player's web input.
+        private void RepairP1WebState()
+        {
+            if (_webController == null || InP2WebContext)
+                return;
+
+            try
+            {
+                var webType = _webController.GetType();
+                if (_p1WebActiveField == null)
+                    _p1WebActiveField = webType.GetField("webActive",
+                        BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                if (_p1SpringJointField == null)
+                    _p1SpringJointField = webType.GetField("springJoint",
+                        BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                if (_p1DeactivateSpringJointMethod == null)
+                    _p1DeactivateSpringJointMethod = webType.GetMethod("DeactivateSpringJoint",
+                        BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+                        null, new[] { typeof(bool) }, null);
+                if (_p1ReleaseWebMethod == null)
+                    _p1ReleaseWebMethod = webType.GetMethod("ReleaseWeb",
+                        BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+                        null, new[] { typeof(bool) }, null);
+
+                if (_p1WebActiveField == null || _p1SpringJointField == null)
+                    return;
+
+                bool active = (bool)_p1WebActiveField.GetValue(_webController);
+                SpringJoint joint = _p1SpringJointField.GetValue(_webController) as SpringJoint;
+                if (!active && joint != null)
+                {
+                    if (_p1DeactivateSpringJointMethod != null)
+                        _p1DeactivateSpringJointMethod.Invoke(_webController, new object[] { true });
+                    else
+                    {
+                        UnityEngine.Object.Destroy(joint);
+                        _p1SpringJointField.SetValue(_webController, null);
+                    }
+                    LoggerInstance.Msg("[P1WebRepair] Removed an orphaned P1 spring joint.");
+                }
+                else if (active && joint == null && _p1ReleaseWebMethod != null)
+                {
+                    _p1ReleaseWebMethod.Invoke(_webController, new object[] { false });
+                    LoggerInstance.Msg("[P1WebRepair] Cleared P1 webActive after its joint disappeared.");
+                }
+            }
+            catch (Exception ex)
+            {
+                LoggerInstance.Warning("[P1WebRepair] Failed: " + ex.Message);
+            }
+        }
+
+        private static void ReanchorSharedTargets(GameObject p1Spider, List<ReanchoredTransformParent> reanchored)
+        {
+            if (p1Spider == null || reanchored == null) return;
+            try
+            {
+                ReanchorField(p1Spider, "_Scripts.Spider.BodyMovement", "targetTransform", reanchored);
                 // NOTE: do NOT reanchor LegController.targetLocal here. The cloned
                 // LegControllers on P2 are destroyed synchronously right after
                 // Instantiate (no Update runs on them), so they can't share P1's
@@ -2826,7 +2957,7 @@ namespace AWJSplitScreen
             }
         }
 
-        private static void ReanchorField(GameObject p1Spider, string typeName, string fieldName)
+        private static void ReanchorField(GameObject p1Spider, string typeName, string fieldName, List<ReanchoredTransformParent> reanchored)
         {
             var t = AccessTools.TypeByName(typeName);
             if (t == null) return;
@@ -2836,7 +2967,7 @@ namespace AWJSplitScreen
             var comps = p1Spider.GetComponentsInChildren(t, true);
             if (comps == null) return;
 
-            int reanchored = 0;
+            int reanchoredCount = 0;
             for (int i = 0; i < comps.Length; i++)
             {
                 var comp = comps[i] as Component;
@@ -2848,16 +2979,45 @@ namespace AWJSplitScreen
 
                 if (!tt.IsChildOf(p1Spider.transform))
                 {
+                    reanchored.Add(new ReanchoredTransformParent
+                    {
+                        Transform = tt,
+                        Parent = tt.parent,
+                        SiblingIndex = tt.GetSiblingIndex()
+                    });
                     tt.SetParent(comp.transform, worldPositionStays: true);
-                    reanchored++;
+                    reanchoredCount++;
                 }
             }
-            if (reanchored > 0)
-                MelonLogger.Msg("[ReanchorSharedTargets] re-parented " + reanchored + " " + typeName + "." + fieldName + " back into P1 hierarchy before clone.");
+            if (reanchoredCount > 0)
+                MelonLogger.Msg("[ReanchorSharedTargets] temporarily re-parented " + reanchoredCount + " " + typeName + "." + fieldName + " for the P2 clone.");
+        }
+
+        private static void RestoreReanchoredTargets(List<ReanchoredTransformParent> reanchored)
+        {
+            if (reanchored == null) return;
+
+            for (int i = reanchored.Count - 1; i >= 0; i--)
+            {
+                var state = reanchored[i];
+                if (state == null || state.Transform == null) continue;
+
+                state.Transform.SetParent(state.Parent, worldPositionStays: true);
+                if (state.Parent != null)
+                {
+                    int maxIndex = Math.Max(0, state.Parent.childCount - 1);
+                    state.Transform.SetSiblingIndex(Math.Min(state.SiblingIndex, maxIndex));
+                }
+            }
         }
 
         private void Teardown()
         {
+            // Defensive cleanup if setup was interrupted between re-parenting P1's
+            // target and cloning P2.  This must never survive into single-player.
+            RestoreReanchoredTargets(_p1CloneReanchors);
+            _p1CloneReanchors.Clear();
+
             if (_camLeftOrTop != null) _camLeftOrTop.rect = new Rect(0f, 0f, 1f, 1f);
 
             if (_camRightOrBottom != null)
@@ -2885,6 +3045,12 @@ namespace AWJSplitScreen
             try { P2MovableCollisionHelper.Reset(); } catch { }
 
             _webController = null;
+            _p1MobileShootWebMethod = null;
+            _p1WebActiveField = null;
+            _p1SpringJointField = null;
+            _p1DeactivateSpringJointMethod = null;
+            _p1ReleaseWebMethod = null;
+            _p1ShootHeldPrev = false;
             _p2SpiderInteraction = null;
             _p2SpiderMobileInteractMethod = null;
 
@@ -5506,10 +5672,13 @@ namespace AWJSplitScreen
 
         public static bool CallbackContextFilter_Prefix(object __instance, ref UnityEngine.InputSystem.InputAction.CallbackContext __0)
         {
+            // P2 movement, jump and sprint are all driven by the dedicated polling
+            // path. Letting the cloned BodyMovement also consume the shared game's
+            // callbacks makes P1's controls act on P2 and can apply jump input twice.
+            if (IsP2(__instance)) return false;
+
             if (!SplitScreenMod.FilterP1FromP2Gamepad) return true;
             if (!SplitScreenMod.P2UseGamepad) return true;
-
-            if (IsP2(__instance)) return true;
 
             if (InputCompat.IsCallbackContextFromP2Gamepad(__0, SplitScreenMod.P2GamepadIndex))
                 return false;
@@ -7113,6 +7282,22 @@ namespace AWJSplitScreen
                 if (gp == null) continue;
                 if (p2gp != null && object.ReferenceEquals(gp, p2gp)) continue;
                 if (ReadButtonDown(gp, _buttonSouthProp)) return true;
+            }
+            return false;
+        }
+
+        public static bool IsP1ShootRTHeldNow(int p2Index, float triggerThreshold)
+        {
+            const int MaxGamepads = 8;
+            var p2gp = GetP2Gamepad(p2Index);
+            for (int i = 0; i < MaxGamepads; i++)
+            {
+                if (i == p2Index) continue;
+                var gp = GetGamepadAtIndex(i);
+                if (gp == null) continue;
+                if (p2gp != null && object.ReferenceEquals(gp, p2gp)) continue;
+                if (ReadAxis(gp, _rightTriggerProp) >= triggerThreshold)
+                    return true;
             }
             return false;
         }
