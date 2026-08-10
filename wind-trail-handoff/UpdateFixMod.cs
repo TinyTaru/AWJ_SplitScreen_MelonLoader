@@ -81,19 +81,8 @@ namespace AWJSplitScreenUpdateFix
         private static readonly List<Material> p2ShellMaterials = new List<Material>();
         private static int preparedP2Id;
         private static int preparedP2WindId;
-        private static int preparedP2WindPlayerId;
-        // Runtime testing proved that cycling WindParticleSystem_P2 itself is NOT
-        // sufficient, while cycling PlayerSpider_P2 is.  That means the missing
-        // initialization lives somewhere in the cloned player hierarchy (or in a
-        // component that observes its OnDisable/OnEnable), not in the ParticleSystem.
-        // Give each newly-created P2 root one clean inactive -> active lifecycle after
-        // the split-screen mod has finished rewriting the clone.
-        private static GameObject pendingP2PlayerLifecycle;
-        private static int pendingP2PlayerDisableFrame = -1;
-        private static int pendingP2PlayerEnableFrame = -1;
-        private static int completedP2PlayerLifecycleId;
-        // The P2 effect may be detached from the cloned camera (or parented to P2 in
-        // the fallback path), so retain the exact object rather than rediscovering it.
+        // The P2 effect is deliberately reparented to P2's body, so it must not
+        // be rediscovered solely by searching under the P2 camera on later frames.
         private static Component p2WindSystem;
         private static int diagnosticP2Id;
         private static int lastDistanceBand = -1;
@@ -297,18 +286,6 @@ namespace AWJSplitScreenUpdateFix
             ResetP2ShellMaterials();
             preparedP2Id = 0;
             preparedP2WindId = 0;
-            preparedP2WindPlayerId = 0;
-            pendingP2PlayerLifecycle = null;
-            pendingP2PlayerDisableFrame = -1;
-            pendingP2PlayerEnableFrame = -1;
-            completedP2PlayerLifecycleId = 0;
-            // The wind object is detached from the cloned camera so its FollowTarget can
-            // track P2 without inheriting either camera transform. Destroy it explicitly
-            // during teardown so it cannot survive into the next split-screen session.
-            if (p2WindSystem != null)
-            {
-                UnityEngine.Object.Destroy(p2WindSystem.gameObject);
-            }
             p2WindSystem = null;
             diagnosticP2Id = 0;
             lastDistanceBand = -1;
@@ -1344,31 +1321,16 @@ namespace AWJSplitScreenUpdateFix
 
         private static void EnsureP2WindTrail()
         {
-            // Exact runtime reproduction of the Unity Explorer workaround.  Cycling
-            // only WindParticleSystem_P2 does nothing; cycling PlayerSpider_P2 fixes the
-            // trail.  Pump that player-root lifecycle before normal discovery, because
-            // GameObject.Find cannot see PlayerSpider_P2 while it is intentionally off.
-            if (PumpPendingP2PlayerLifecycleRefresh())
-            {
-                return;
-            }
-
             if (windParticleSystemType == null || p2CameraField == null || bodyMovementType == null || rigidbodyField == null)
             {
                 return;
             }
 
-            GameObject playerOne = GameObject.Find("PlayerSpider");
             GameObject playerTwo = GameObject.Find("PlayerSpider_P2");
             Camera p2Camera = p2CameraField.GetValue(null) as Camera;
-            if (playerOne == null || playerTwo == null || p2Camera == null)
+            if (playerTwo == null || p2Camera == null)
             {
                 preparedP2WindId = 0;
-                preparedP2WindPlayerId = 0;
-                if (playerTwo == null && pendingP2PlayerLifecycle == null)
-                {
-                    completedP2PlayerLifecycleId = 0;
-                }
                 return;
             }
 
@@ -1379,19 +1341,9 @@ namespace AWJSplitScreenUpdateFix
                 return;
             }
 
-            Component p1Wind = FindP1WindSystem(p2Camera);
-            if (p1Wind == null)
-            {
-                return;
-            }
-
             Component p2Wind = p2WindSystem;
             if (p2Wind == null)
             {
-                // SetupCameras clones the complete P1 camera hierarchy, including the
-                // real WindParticleSystem GameObject. Prefer that exact serialized clone:
-                // it already contains the Trails module, renderer trail material, vertex
-                // streams, shape/noise/etc. with no hand-authored reconstruction.
                 Component[] cameraWindSystems = p2Camera.GetComponentsInChildren(windParticleSystemType, true);
                 if (cameraWindSystems.Length > 0)
                 {
@@ -1399,67 +1351,54 @@ namespace AWJSplitScreenUpdateFix
                 }
                 else
                 {
-                    // Fallback for camera-prefab changes: clone the live P1 wind object
-                    // itself. This still copies the real ParticleSystem and renderer state.
-                    GameObject clone = UnityEngine.Object.Instantiate(p1Wind.gameObject);
-                    clone.name = p1Wind.gameObject.name + "_P2";
-                    p2Wind = clone.GetComponent(windParticleSystemType);
+                    UnityEngine.Object[] allWindSystems = UnityEngine.Object.FindObjectsOfType(windParticleSystemType, true);
+                    foreach (UnityEngine.Object candidateObject in allWindSystems)
+                    {
+                        Component candidate = candidateObject as Component;
+                        if (candidate == null || candidate.GetComponentInParent<Camera>() == p2Camera)
+                        {
+                            continue;
+                        }
+
+                        GameObject clone = UnityEngine.Object.Instantiate(candidate.gameObject, p2Camera.transform);
+                        clone.name = candidate.gameObject.name + "_P2";
+                        clone.transform.localPosition = candidate.transform.localPosition;
+                        clone.transform.localRotation = candidate.transform.localRotation;
+                        clone.transform.localScale = candidate.transform.localScale;
+                        p2Wind = clone.GetComponent(windParticleSystemType);
+                        break;
+                    }
                 }
 
                 p2WindSystem = p2Wind;
             }
 
-            if (p2Wind == null || p2Wind == p1Wind)
+            if (p2Wind == null)
             {
                 return;
             }
 
-            int windId = p2Wind.GetInstanceID();
-            int playerId = playerTwo.GetInstanceID();
-            // The wind object can survive a P2 despawn when it was detached from the
-            // camera/player hierarchy.  A newly spawned P2 therefore also requires all
-            // target/simulation-space references to be rebound even if windId is unchanged.
-            bool firstPreparation = preparedP2WindId != windId || preparedP2WindPlayerId != playerId;
-            if (firstPreparation)
+            // WindParticleSystem is written for the singleton P1 rigidbody and also owns
+            // the global wind audio.  Leave the P1 copy untouched; P2 gets an independent
+            // particle-only driver using its own speed.
+            Behaviour originalWindDriver = p2Wind as Behaviour;
+            if (originalWindDriver != null)
             {
-                // The cloned game driver is hard-wired to Singleton<GameController>.Player,
-                // so it must not drive P2. Disabling it invokes its OnDisable (which stops
-                // the global loop), therefore restore P1's audio immediately afterwards if
-                // P1 is currently above the wind threshold.
-                Behaviour originalWindDriver = p2Wind as Behaviour;
-                if (originalWindDriver != null && originalWindDriver.enabled)
-                {
-                    originalWindDriver.enabled = false;
-                    RestoreP1WindAudioIfFast(p1Wind, playerOne);
-                }
-
-                p2Wind.gameObject.SetActive(true);
-
-                // The camera clone's _Scripts.Camera.FollowTarget is disabled by
-                // DisableCameraDriverBehaviours(). P1's wind object relies on that
-                // component for its authored spider-relative placement/orientation.
-                // Detach from the camera and re-enable the SAME FollowTarget after
-                // retargeting its `target` field to P2's corresponding transform.
-                p2Wind.transform.SetParent(null, true);
-                bool retargetedFollow = RetargetP2WindFollowTarget(p2Wind, playerOne, playerTwo, p2Rigidbody.transform);
-                if (!retargetedFollow)
-                {
-                    // Safe fallback if a future game build removes FollowTarget: preserve
-                    // the live P1 wind object's pose relative to P1's rigidbody and apply
-                    // that same pose relative to P2's rigidbody.
-                    AttachP2WindUsingP1RelativePose(p1Wind, p2Wind, playerOne, playerTwo, p2Rigidbody);
-                }
-
-                MirrorCriticalWindRendererState(p1Wind, p2Wind);
-                RemapP2WindCustomSimulationSpace(p1Wind, p2Wind, playerOne, playerTwo, p2Camera);
-
-                // Keep the original wind layer and make sure P2's output camera sees it.
-                p2Wind.gameObject.layer = p1Wind.gameObject.layer;
-                int windLayer = p2Wind.gameObject.layer;
-                if (windLayer >= 0 && windLayer < 32)
-                {
-                    p2Camera.cullingMask |= 1 << windLayer;
-                }
+                originalWindDriver.enabled = false;
+            }
+            p2Wind.gameObject.SetActive(true);
+            // Keep the wind origin on P2's spider. The copied object can retain P1's
+            // world transform, making its particles appear around P1 instead.
+            p2Wind.transform.SetParent(p2Rigidbody.transform, false);
+            p2Wind.transform.localPosition = Vector3.zero;
+            p2Wind.transform.localRotation = Quaternion.identity;
+            // Keep the source effect layer, but explicitly make it visible to P2's
+            // camera.  The copied camera mask can omit this layer even while P1's
+            // camera renders it, leaving P2 particles alive but invisible.
+            int windLayer = p2Wind.gameObject.layer;
+            if (windLayer >= 0 && windLayer < 32)
+            {
+                p2Camera.cullingMask |= 1 << windLayer;
             }
 
             P2WindTrail trail = p2Wind.GetComponent<P2WindTrail>();
@@ -1468,456 +1407,17 @@ namespace AWJSplitScreenUpdateFix
                 trail = p2Wind.gameObject.AddComponent<P2WindTrail>();
             }
 
-            float activateThreshold = ReadFloat(windActivateThresholdField, p1Wind, 12f);
-            float deactivateThreshold = ReadFloat(windDeactivateThresholdField, p1Wind, activateThreshold * 0.8f);
-            float maxVelocity = ReadFloat(windMaxVelocityField, p1Wind, activateThreshold * 2f);
+            float activateThreshold = ReadFloat(windActivateThresholdField, p2Wind, 12f);
+            float deactivateThreshold = ReadFloat(windDeactivateThresholdField, p2Wind, activateThreshold * 0.8f);
+            float maxVelocity = ReadFloat(windMaxVelocityField, p2Wind, activateThreshold * 2f);
             trail.Configure(p2Rigidbody, activateThreshold, deactivateThreshold, maxVelocity);
 
-            if (firstPreparation)
+            int windId = p2Wind.GetInstanceID();
+            if (preparedP2WindId != windId)
             {
                 preparedP2WindId = windId;
-                preparedP2WindPlayerId = playerId;
-                MelonLogger.Msg("[UpdateFix] Connected P2's real wind-trail clone to P2 velocity (activate=" +
-                    activateThreshold.ToString("F1") + ", deactivate=" + deactivateThreshold.ToString("F1") + ").");
-                LogWindParticleConfiguration("P1", p1Wind, Camera.main);
-                LogWindParticleConfiguration("P2", p2Wind, p2Camera);
-
-                // Decisive runtime finding (second test): cycling this wind GameObject
-                // alone does NOT fix the trail, but cycling PlayerSpider_P2 does.  The
-                // dependency is therefore in the cloned player lifecycle.  Reproduce the
-                // exact proven action once per P2 instance, after all clone rewrites and
-                // wind retargeting have completed.
-                if (completedP2PlayerLifecycleId != playerId)
-                {
-                    ScheduleP2PlayerLifecycleRefresh(playerTwo);
-                }
+                MelonLogger.Msg("[UpdateFix] Connected P2's wind trail to P2 velocity (activate=" + activateThreshold.ToString("F1") + ", deactivate=" + deactivateThreshold.ToString("F1") + ").");
             }
-        }
-
-        private static void ScheduleP2PlayerLifecycleRefresh(GameObject playerTwo)
-        {
-            if (playerTwo == null)
-            {
-                return;
-            }
-
-            int playerId = playerTwo.GetInstanceID();
-            if (completedP2PlayerLifecycleId == playerId)
-            {
-                return;
-            }
-            if (pendingP2PlayerLifecycle != null &&
-                pendingP2PlayerLifecycle.GetInstanceID() == playerId)
-            {
-                return;
-            }
-
-            pendingP2PlayerLifecycle = playerTwo;
-            // Wait one frame before disabling.  This keeps the pulse out of the frame in
-            // which SetupSecondSpider / UpdateFix first finish mutating the active clone.
-            pendingP2PlayerDisableFrame = Time.frameCount + 1;
-            pendingP2PlayerEnableFrame = -1;
-            MelonLogger.Msg("[UpdateFix] Scheduled one-time PlayerSpider_P2 lifecycle refresh for wind-trail initialization.");
-        }
-
-        // Returns true while P2 is intentionally inactive and normal wind maintenance
-        // must be skipped.  On the re-enable frame it returns false so EnsureP2WindTrail
-        // immediately rebinds the wind system against the freshly-enabled player.
-        private static bool PumpPendingP2PlayerLifecycleRefresh()
-        {
-            GameObject playerTwo = pendingP2PlayerLifecycle;
-            if (playerTwo == null)
-            {
-                pendingP2PlayerLifecycle = null;
-                pendingP2PlayerDisableFrame = -1;
-                pendingP2PlayerEnableFrame = -1;
-                return false;
-            }
-
-            if (pendingP2PlayerEnableFrame >= 0)
-            {
-                if (Time.frameCount < pendingP2PlayerEnableFrame)
-                {
-                    return true;
-                }
-
-                int playerId = playerTwo.GetInstanceID();
-                if (!playerTwo.activeSelf)
-                {
-                    playerTwo.SetActive(true);
-                }
-
-                completedP2PlayerLifecycleId = playerId;
-                pendingP2PlayerLifecycle = null;
-                pendingP2PlayerDisableFrame = -1;
-                pendingP2PlayerEnableFrame = -1;
-
-                // Re-run the wind reference/renderer mirroring immediately after all of
-                // P2's OnEnable callbacks.  Do not schedule another pulse: the completed
-                // player instance ID above prevents recursion.
-                preparedP2WindId = 0;
-                preparedP2WindPlayerId = 0;
-
-                MelonLogger.Msg("[UpdateFix] PlayerSpider_P2 lifecycle refresh: re-enabled player; forcing post-OnEnable wind rebind.");
-                return false;
-            }
-
-            if (Time.frameCount < pendingP2PlayerDisableFrame)
-            {
-                return false;
-            }
-
-            if (playerTwo.activeSelf)
-            {
-                playerTwo.SetActive(false);
-            }
-            pendingP2PlayerEnableFrame = Time.frameCount + 1;
-            MelonLogger.Msg("[UpdateFix] PlayerSpider_P2 lifecycle refresh: disabled player for one frame.");
-            return true;
-        }
-
-        private static Component FindP1WindSystem(Camera p2Camera)
-        {
-            UnityEngine.Object[] allWindSystems = UnityEngine.Object.FindObjectsOfType(windParticleSystemType, true);
-            Component fallback = null;
-            for (int i = 0; allWindSystems != null && i < allWindSystems.Length; i++)
-            {
-                Component candidate = allWindSystems[i] as Component;
-                if (candidate == null || candidate == p2WindSystem)
-                {
-                    continue;
-                }
-
-                if (p2Camera != null && candidate.transform.IsChildOf(p2Camera.transform))
-                {
-                    continue;
-                }
-
-                if (candidate.gameObject.name.EndsWith("_P2", StringComparison.Ordinal))
-                {
-                    continue;
-                }
-
-                Camera ownerCamera = candidate.GetComponentInParent<Camera>();
-                if (ownerCamera != null && ownerCamera != p2Camera)
-                {
-                    return candidate;
-                }
-
-                if (fallback == null)
-                {
-                    fallback = candidate;
-                }
-            }
-            return fallback;
-        }
-
-        private static bool RetargetP2WindFollowTarget(Component p2Wind, GameObject playerOne, GameObject playerTwo, Transform fallbackTarget)
-        {
-            Behaviour[] behaviours = p2Wind.GetComponents<Behaviour>();
-            for (int i = 0; behaviours != null && i < behaviours.Length; i++)
-            {
-                Behaviour behaviour = behaviours[i];
-                if (behaviour == null)
-                {
-                    continue;
-                }
-
-                Type type = behaviour.GetType();
-                string fullName = type.FullName ?? type.Name;
-                if (!string.Equals(type.Name, "FollowTarget", StringComparison.Ordinal) &&
-                    !fullName.EndsWith(".FollowTarget", StringComparison.Ordinal))
-                {
-                    continue;
-                }
-
-                FieldInfo targetField = AccessTools.Field(type, "target");
-                if (targetField == null)
-                {
-                    continue;
-                }
-
-                Transform priorTarget = targetField.GetValue(behaviour) as Transform;
-                Transform p2Target = null;
-                if (priorTarget != null)
-                {
-                    if (IsTransformWithin(priorTarget, playerTwo.transform))
-                    {
-                        p2Target = priorTarget;
-                    }
-                    else
-                    {
-                        p2Target = FindMirroredTransform(priorTarget, playerOne.transform, playerTwo.transform);
-                    }
-                }
-                if (p2Target == null)
-                {
-                    p2Target = fallbackTarget;
-                }
-
-                targetField.SetValue(behaviour, p2Target);
-                behaviour.enabled = true;
-                MelonLogger.Msg("[UpdateFix] Retargeted P2 wind FollowTarget from " +
-                    DescribeTransform(priorTarget) + " to " + DescribeTransform(p2Target) + ".");
-                return true;
-            }
-            return false;
-        }
-
-        private static void AttachP2WindUsingP1RelativePose(Component p1Wind, Component p2Wind, GameObject playerOne, GameObject playerTwo, Rigidbody p2Rigidbody)
-        {
-            Transform p1Anchor = null;
-            Component p1Body = playerOne.GetComponentInChildren(bodyMovementType, true);
-            Rigidbody p1Rigidbody = p1Body == null ? null : rigidbodyField.GetValue(p1Body) as Rigidbody;
-            if (p1Rigidbody != null)
-            {
-                p1Anchor = p1Rigidbody.transform;
-            }
-
-            Vector3 localPosition = Vector3.zero;
-            Quaternion localRotation = Quaternion.identity;
-            if (p1Anchor != null && p1Wind != null)
-            {
-                localPosition = p1Anchor.InverseTransformPoint(p1Wind.transform.position);
-                localRotation = Quaternion.Inverse(p1Anchor.rotation) * p1Wind.transform.rotation;
-            }
-
-            p2Wind.transform.SetParent(p2Rigidbody.transform, false);
-            p2Wind.transform.localPosition = localPosition;
-            p2Wind.transform.localRotation = localRotation;
-            MelonLogger.Warning("[UpdateFix] P2 wind FollowTarget was unavailable; using P1's rigidbody-relative wind pose instead.");
-        }
-
-        private static void MirrorCriticalWindRendererState(Component p1Wind, Component p2Wind)
-        {
-            ParticleSystem p1System = p1Wind == null ? null : p1Wind.GetComponent<ParticleSystem>();
-            ParticleSystem p2System = p2Wind == null ? null : p2Wind.GetComponent<ParticleSystem>();
-            ParticleSystemRenderer sourceRenderer = p1System == null ? null : p1System.GetComponent<ParticleSystemRenderer>();
-            ParticleSystemRenderer destinationRenderer = p2System == null ? null : p2System.GetComponent<ParticleSystemRenderer>();
-            if (sourceRenderer == null || destinationRenderer == null)
-            {
-                return;
-            }
-
-            // Instantiate already copies the complete renderer. Re-assert only the
-            // properties that decide whether the authored trail can be drawn. In
-            // particular, RenderMode=None is intentional: it hides particle sprites while
-            // the Trails module renders through Wind_Line.
-            destinationRenderer.enabled = sourceRenderer.enabled;
-            destinationRenderer.forceRenderingOff = sourceRenderer.forceRenderingOff;
-            destinationRenderer.renderMode = sourceRenderer.renderMode;
-            destinationRenderer.trailMaterial = sourceRenderer.trailMaterial;
-            destinationRenderer.sortingLayerID = sourceRenderer.sortingLayerID;
-            destinationRenderer.sortingOrder = sourceRenderer.sortingOrder;
-            destinationRenderer.renderingLayerMask = sourceRenderer.renderingLayerMask;
-
-            // Wind_Line can depend on trail-specific vertex streams. Camera/GameObject
-            // cloning should preserve them, but copying the live P1 list makes that
-            // dependency explicit and guards against clone-time renderer mutations.
-            List<ParticleSystemVertexStream> trailStreams = new List<ParticleSystemVertexStream>();
-            sourceRenderer.GetActiveTrailVertexStreams(trailStreams);
-            destinationRenderer.SetActiveTrailVertexStreams(trailStreams);
-        }
-
-        private static void RemapP2WindCustomSimulationSpace(Component p1Wind, Component p2Wind, GameObject playerOne, GameObject playerTwo, Camera p2Camera)
-        {
-            ParticleSystem sourceSystem = p1Wind == null ? null : p1Wind.GetComponent<ParticleSystem>();
-            ParticleSystem destinationSystem = p2Wind == null ? null : p2Wind.GetComponent<ParticleSystem>();
-            if (sourceSystem == null || destinationSystem == null)
-            {
-                return;
-            }
-
-            ParticleSystem.MainModule sourceMain = sourceSystem.main;
-            ParticleSystem.MainModule destinationMain = destinationSystem.main;
-            if (sourceMain.simulationSpace != ParticleSystemSimulationSpace.Custom)
-            {
-                return;
-            }
-
-            Transform sourceSpace = sourceMain.customSimulationSpace;
-            if (sourceSpace == null)
-            {
-                return;
-            }
-
-            Transform destinationSpace = null;
-            if (sourceSpace == p1Wind.transform)
-            {
-                destinationSpace = p2Wind.transform;
-            }
-            if (destinationSpace == null)
-            {
-                destinationSpace = FindMirroredTransform(sourceSpace, playerOne.transform, playerTwo.transform);
-            }
-
-            Camera p1Camera = p1Wind.GetComponentInParent<Camera>();
-            if (destinationSpace == null && p1Camera != null && p2Camera != null)
-            {
-                destinationSpace = FindMirroredTransform(sourceSpace, p1Camera.transform, p2Camera.transform);
-            }
-
-            if (destinationSpace != null)
-            {
-                destinationMain.customSimulationSpace = destinationSpace;
-            }
-            else
-            {
-                MelonLogger.Warning("[UpdateFix] P1 wind uses Custom simulation space " + DescribeTransform(sourceSpace) +
-                    "; no P2 mirror was found, so the cloned reference was left unchanged.");
-            }
-        }
-
-        private static Transform FindMirroredTransform(Transform source, Transform sourceRoot, Transform destinationRoot)
-        {
-            if (source == null || sourceRoot == null || destinationRoot == null)
-            {
-                return null;
-            }
-            if (source == sourceRoot)
-            {
-                return destinationRoot;
-            }
-
-            List<int> path = new List<int>();
-            List<string> pathNames = new List<string>();
-            Transform cursor = source;
-            while (cursor != null && cursor != sourceRoot)
-            {
-                path.Add(cursor.GetSiblingIndex());
-                pathNames.Add(cursor.name);
-                cursor = cursor.parent;
-            }
-            if (cursor != sourceRoot)
-            {
-                return null;
-            }
-
-            Transform destination = destinationRoot;
-            for (int i = path.Count - 1; i >= 0; i--)
-            {
-                int childIndex = path[i];
-                string expectedName = pathNames[i];
-                Transform next = childIndex >= 0 && childIndex < destination.childCount
-                    ? destination.GetChild(childIndex)
-                    : null;
-
-                // P2 visual cleanup can remove/rebuild siblings after the initial spider
-                // clone. Prefer the original sibling index, but fall back to the matching
-                // child name if that index no longer describes the same transform.
-                if (next == null || !string.Equals(next.name, expectedName, StringComparison.Ordinal))
-                {
-                    next = null;
-                    for (int child = 0; child < destination.childCount; child++)
-                    {
-                        Transform candidate = destination.GetChild(child);
-                        if (string.Equals(candidate.name, expectedName, StringComparison.Ordinal))
-                        {
-                            next = candidate;
-                            break;
-                        }
-                    }
-                }
-
-                if (next == null)
-                {
-                    return null;
-                }
-                destination = next;
-            }
-            return destination;
-        }
-
-        private static bool IsTransformWithin(Transform transform, Transform root)
-        {
-            if (transform == null || root == null)
-            {
-                return false;
-            }
-            return transform == root || transform.IsChildOf(root);
-        }
-
-        private static string DescribeTransform(Transform transform)
-        {
-            return transform == null ? "null" : transform.name + "@" + transform.position.ToString("F2");
-        }
-
-        private static void LogWindParticleConfiguration(string label, Component wind, Camera camera)
-        {
-            try
-            {
-                ParticleSystem system = wind == null ? null : wind.GetComponent<ParticleSystem>();
-                ParticleSystemRenderer renderer = system == null ? null : system.GetComponent<ParticleSystemRenderer>();
-                if (system == null)
-                {
-                    MelonLogger.Warning("[UpdateFix] " + label + " wind has no ParticleSystem.");
-                    return;
-                }
-
-                ParticleSystem.MainModule main = system.main;
-                ParticleSystem.TrailModule trails = system.trails;
-                Material trailMaterial = renderer == null ? null : renderer.trailMaterial;
-                List<ParticleSystemVertexStream> trailStreams = new List<ParticleSystemVertexStream>();
-                if (renderer != null)
-                {
-                    renderer.GetActiveTrailVertexStreams(trailStreams);
-                }
-                bool cameraSeesLayer = camera != null && (camera.cullingMask & (1 << system.gameObject.layer)) != 0;
-                MelonLogger.Msg("[UpdateFix] " + label + " wind config: sim=" + main.simulationSpace +
-                    " custom=" + DescribeTransform(main.customSimulationSpace) +
-                    " scaling=" + main.scalingMode +
-                    " trailsEnabled=" + trails.enabled +
-                    " trailMode=" + trails.mode +
-                    " ratio=" + trails.ratio.ToString("F2") +
-                    " worldSpace=" + trails.worldSpace +
-                    " lifetimeMul=" + trails.lifetimeMultiplier.ToString("F2") +
-                    " minVertex=" + trails.minVertexDistance.ToString("F3") +
-                    " widthMul=" + trails.widthOverTrailMultiplier.ToString("F3") +
-                    " rendererMode=" + (renderer == null ? "null" : renderer.renderMode.ToString()) +
-                    " rendererEnabled=" + (renderer != null && renderer.enabled) +
-                    " forceOff=" + (renderer != null && renderer.forceRenderingOff) +
-                    " trailMat=" + (trailMaterial == null ? "null" : trailMaterial.name) +
-                    " trailStreams=" + trailStreams.Count +
-                    " layer=" + system.gameObject.layer +
-                    " cameraSeesLayer=" + cameraSeesLayer + ".");
-            }
-            catch (Exception ex)
-            {
-                MelonLogger.Warning("[UpdateFix] Could not log " + label + " wind configuration: " + ex.Message);
-            }
-        }
-
-        private static void RestoreP1WindAudioIfFast(Component p1Wind, GameObject playerOne)
-        {
-            try
-            {
-                Component p1Body = playerOne == null ? null : playerOne.GetComponentInChildren(bodyMovementType, true);
-                Rigidbody p1Rigidbody = p1Body == null ? null : rigidbodyField.GetValue(p1Body) as Rigidbody;
-                float activateThreshold = ReadFloat(windActivateThresholdField, p1Wind, 12f);
-                float maxVelocity = ReadFloat(windMaxVelocityField, p1Wind, activateThreshold * 2f);
-                float deactivateThreshold = ReadFloat(windDeactivateThresholdField, p1Wind, activateThreshold * 0.8f);
-                if (p1Rigidbody == null || p1Rigidbody.linearVelocity.magnitude <= activateThreshold)
-                {
-                    return;
-                }
-
-                Type musicControllerType = AccessTools.TypeByName("_Scripts.Singletons.MusicController");
-                Type singletonType = musicControllerType == null ? null : musicControllerType.BaseType;
-                PropertyInfo instanceProperty = singletonType == null ? null : singletonType.GetProperty("Instance", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
-                object controller = instanceProperty == null ? null : instanceProperty.GetValue(null, null);
-                MethodInfo start = musicControllerType == null ? null : AccessTools.Method(musicControllerType, "StartWindLoop");
-                MethodInfo setSpeed = musicControllerType == null ? null : AccessTools.Method(musicControllerType, "SetWindLoopSpeed");
-                if (controller != null && start != null)
-                {
-                    start.Invoke(controller, null);
-                    if (setSpeed != null)
-                    {
-                        float speed = p1Rigidbody.linearVelocity.magnitude;
-                        setSpeed.Invoke(controller, new object[] { Mathf.InverseLerp(deactivateThreshold, maxVelocity, speed) });
-                    }
-                }
-            }
-            catch { }
         }
 
         private static float ReadFloat(FieldInfo field, object instance, float fallback)
@@ -2121,16 +1621,6 @@ namespace AWJSplitScreenUpdateFix
                             renderer.forceRenderingOff = false;
                         }
                         system.gameObject.SetActive(true);
-                        ParticleSystem.EmissionModule emission = system.emission;
-                        emission.enabled = active;
-                        // Vanilla WindParticleSystem never restarts the simulation when
-                        // speed crosses the threshold; it only toggles emission. Keep the
-                        // ParticleSystem running so its authored Trails module owns trail
-                        // creation/lifetime exactly as on P1.
-                        if (!system.isPlaying)
-                        {
-                            system.Play(true);
-                        }
                     }
                 }
 
@@ -2180,37 +1670,6 @@ namespace AWJSplitScreenUpdateFix
                 }
             }
 
-            private void OnEnable()
-            {
-                // The first OnEnable happens immediately when this component is added,
-                // before Configure has supplied its Rigidbody/system cache.  Keep this
-                // defensive initialization for any later wind-object activation, although
-                // the proven startup fix now cycles PlayerSpider_P2 rather than this object.
-                if (playerRigidbody == null || particleSystems == null)
-                {
-                    return;
-                }
-
-                foreach (ParticleSystem system in particleSystems)
-                {
-                    if (system == null) continue;
-                    ParticleSystemRenderer renderer = system.GetComponent<ParticleSystemRenderer>();
-                    if (renderer != null)
-                    {
-                        renderer.enabled = true;
-                        renderer.forceRenderingOff = false;
-                    }
-                    if (!system.isPlaying)
-                    {
-                        system.Play(true);
-                    }
-                }
-
-                // Restore the same threshold state immediately after the activation pulse;
-                // otherwise OnDisable intentionally left emission off until Update runs.
-                SetActive(playerRigidbody.linearVelocity.magnitude > activateThreshold);
-            }
-
             private void OnDisable()
             {
                 SetActive(false);
@@ -2219,10 +1678,6 @@ namespace AWJSplitScreenUpdateFix
             private void SetActive(bool value)
             {
                 active = value;
-                if (particleSystems == null)
-                {
-                    return;
-                }
                 foreach (ParticleSystem system in particleSystems)
                 {
                     if (system == null)
@@ -2231,10 +1686,14 @@ namespace AWJSplitScreenUpdateFix
                     }
 
                     ParticleSystem.EmissionModule emission = system.emission;
-                    // Match the game's WindParticleSystem literally: do not Emit(),
-                    // Clear(), change RenderMode, or restart the system here. The hidden
-                    // particles are only anchors for the real Trails module.
+                    // This exactly mirrors WindParticleSystem: the original
+                    // prefab's emission/trail modules create the visible wisps.
                     emission.enabled = value;
+                    if (value)
+                    {
+                        system.Clear(true);
+                        system.Play(true);
+                    }
                 }
             }
 

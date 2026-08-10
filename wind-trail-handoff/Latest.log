@@ -1,0 +1,134 @@
+
+[13:04:05.527] ------------------------------
+[13:04:05.561] MelonLoader v0.7.2 Open-Beta
+[13:04:05.564] OS: Windows 11
+[13:04:05.564] Hash Code: 9DA4175149E7EBA5F67511461A658D15CD062C287E34FC9A03B1EFC8FDC8D21C
+[13:04:05.564] ------------------------------
+[13:04:05.610] Game Type: MonoBleedingEdge
+[13:04:05.610] Game Arch: x64
+[13:04:05.610] ------------------------------
+[13:04:05.610] Command-Line: 
+[13:04:05.610] ------------------------------
+[13:04:05.611] Core::BasePath = C:\Program Files (x86)\Steam\steamapps\common\A Webbing Journey
+[13:04:05.611] Game::BasePath = C:\Program Files (x86)\Steam\steamapps\common\A Webbing Journey
+[13:04:05.611] Game::DataPath = C:\Program Files (x86)\Steam\steamapps\common\A Webbing Journey\A Webbing Journey_Data
+[13:04:05.611] Game::ApplicationPath = C:\Program Files (x86)\Steam\steamapps\common\A Webbing Journey\A Webbing Journey.exe
+[13:04:05.611] Runtime Type: net35
+[13:04:05.716] ------------------------------
+[13:04:05.717] Game Name: A Webbing Journey
+[13:04:05.717] Game Developer: Fire Totem Games
+[13:04:05.718] Unity Version: 6000.3.10f1
+[13:04:05.718] Game Version: 0.15.1
+[13:04:05.718] ------------------------------
+
+[13:04:05.897] Preferences Loaded!
+
+[13:04:05.926] Loading UserLibs...
+[13:04:05.939] ------------------------------
+[13:04:05.976] Melon Assembly loaded: '.\UserLibs\UniverseLib.Unity63.Mono.dll'
+[13:04:05.976] SHA256 Hash: '521F55DA4C591C02DB96F67399F92A1D2BE3EAC970598DB984F538CC43043AE3'
+[13:04:05.977] ------------------------------
+[13:04:05.977] 0 UserLibs loaded.
+
+[13:04:05.978] Loading Plugins...
+[13:04:05.981] 0 Plugins loaded.
+
+
+[13:04:07.108] Loading Mods...
+[13:04:07.120] ------------------------------
+[13:04:07.124] Melon Assembly loaded: '.\Mods\AWJ_SplitScreen.dll'
+[13:04:07.124] SHA256 Hash: '4222607F1EDD1672FC8D7F77E20B9BB8FEDFDE0295501F3B634E72748608BCA5'
+[13:04:07.145] Melon Assembly loaded: '.\Mods\UnityExplorer.ML.Unity63.Mono.dll'
+[13:04:07.147] SHA256 Hash: '783AD8C5C09B3D1D45C7E04AEE8D571D877D900AEAA1145AF95A0A213EFEC93A'
+
+[13:04:07.181] ------------------------------
+[13:04:07.182] AWJ Split Screen v0.2.4
+[13:04:07.182] by TinyTaru
+[13:04:07.182] Assembly: AWJ_SplitScreen.dll
+[13:04:07.182] ------------------------------
+[13:04:07.183] ------------------------------
+[13:04:07.183] UnityExplorer v4.14.1
+[13:04:07.183] by Sinai, yukieiji, Jettcodey
+[13:04:07.183] Assembly: UnityExplorer.ML.Unity63.Mono.dll
+[13:04:07.183] ------------------------------
+[13:04:07.183] ------------------------------
+[13:04:07.184] 2 Mods loaded.
+
+[13:04:07.195] Support Module Loaded: C:\Program Files (x86)\Steam\steamapps\common\A Webbing Journey\MelonLoader\Dependencies\SupportModules\Mono.dll
+[13:04:07.478] [AWJ_Split_Screen] Patched BodyMovement: FixedUpdate + NpcWalk + CallbackContext filters=3.
+[13:04:07.478] [AWJ_Split_Screen] BodyMovement moveVector field: moveVector
+[13:04:07.542] [AWJ_Split_Screen] Patched SpiderInteraction: Start + TriggerEnter/Exit + MobileInteract for P2.
+[13:04:07.594] [AWJ_Split_Screen] Patched LegController: FixedUpdate (P2 parent-guard suppression).
+[13:04:07.675] [AWJ_Split_Screen] Patched WebController: Update/Fixed + WebStartPoint/WebDirection + 5 CallbackContext filters.
+[13:04:07.743] [AWJ_Split_Screen] Patched GameplayUI.Update for split-screen crosshair placement.
+[13:04:07.796] [AWJ_Split_Screen] Patched CameraController.InputTransform + CallbackContext filters=1 for P2.
+[13:04:07.856] [AWJ_Split_Screen] Patched CameraMouseLook.OnLook to block P2 gamepad input.
+[13:04:07.913] [AWJ_Split_Screen] Patched CameraZoom.OnZoom to block P2 gamepad input.
+[13:04:07.916] [AWJ_Split_Screen] Patched Camera.main getter for P2.
+[13:04:07.968] [AWJ_Split_Screen] Patched CameraController.MainCamera getter for P2.
+[13:04:07.970] [AWJ_Split_Screen] Patched CameraController.GetCameraDistance for P2.
+[13:04:08.028] [AWJ_Split_Screen] Patched MainWebVisuals.WebController_OnMainWebActivated.
+[13:04:08.031] [AWJ_Split_Screen] Patched MainWebVisuals.WebController_OnMainWebDeactivated.
+[13:04:08.090] [AWJ_Split_Screen] Patched BodyMovement.SetIsUnderwater for P2 audio.
+[13:04:08.142] [AWJ_Split_Screen] Patched MusicController.StopUnderwater for split underwater state.
+[13:04:08.195] [AWJ_Split_Screen] Patched CameraWaterTrigger for per-player filter.
+[13:04:08.258] [AWJ_Split_Screen] Patched WebThread.DeleteWebThread to detach P2 transforms.
+[13:04:08.263] [AWJ_Split_Screen] Patched immediate Unity destroy paths to detach grounded P2 before hierarchy teardown.
+[13:04:09.168] [AWJ_Split_Screen] Loaded: P2 visuals/physics compatibility, isolated input/web state, smooth P2 visuals, two-camera carpet LOD, and P2 wind-trail patch.
+[13:04:09.169] [AWJ_Split_Screen] AWJ Split Screen + P2 Inject v0.2.2 loaded.
+[13:04:09.169] [AWJ_Split_Screen] F8 swap controllers, F9 split, F10 orientation | P2 Move: IJKL or Gamepad LStick | P2 Sprint: LStick click (toggles on/off in all modes) | P2 Look: N/M or RStickX | P2 Zoom: RStick press | P2 Jump: A | P2 Interact: H/X | P2 Web: RT shoot/release, LT quick build, LB fixed anchor, RB moving anchor, B delete/cancel.
+[13:04:09.169] [AWJ_Split_Screen] Diagnostics: set Debug_SpeedLog=true in MelonPreferences.cfg to log movement and detailed camera input/driver/pose state. Press F7 to dump all task/quest states.
+[13:04:09.169] [AWJ_Split_Screen] Tip: If both controllers still move P1, ensure FilterP1FromP2Gamepad=true and P2_GamepadIndex is the second pad (usually 1).
+[13:04:09.174] [UnityExplorer] UnityExplorer 4.14.1 initializing...
+[13:04:09.204] [UnityExplorer] [UniverseLib] UniverseLib 1.7.0 initializing...
+[13:04:09.849] [UnityExplorer] [UniverseLib] Finished UniverseLib initial setup.
+[13:04:09.856] [UnityExplorer] Initialized UnityCrashPrevention for: Canvas.get_renderingDisplaySize
+[13:04:18.712] [UnityExplorer] [UniverseLib] Initialized new InputSystem support.
+[13:04:18.777] [UnityExplorer] [UniverseLib] Loaded modern bundle for Unity 6000.3.10f1
+[13:04:18.811] [UnityExplorer] [UniverseLib] UniverseLib 1.7.0 initialized.
+[13:04:18.813] [UnityExplorer] Creating UI...
+[13:04:19.553] [UnityExplorer] UnityExplorer 4.14.1 (Mono) initialized.
+[13:04:30.348] [AWJ_Split_Screen] Split-screen enabled.
+[13:04:30.513] [AWJ_Split_Screen] Neutralized P2 camera physics: triggers=1 rigidbodies=1 collidersDisabled=true.
+[13:04:30.564] [AWJ_Split_Screen] WebController cached: True
+[13:04:30.817] [AWJ_Split_Screen] Enabled Rigidbody interpolation on P2 spider root.
+[13:04:30.958] [AWJ_Split_Screen] Replaced 8 LegController(s) with P2LegDriver on P2.
+[13:04:30.960] [AWJ_Split_Screen] Rebuilt 1 RigBuilder(s) on P2.
+[13:04:31.003] [AWJ_Split_Screen] Set isPlayer=false on 1 P2 BodyMovement(s).
+[13:04:31.003] [AWJ_Split_Screen] Nulled followTarget on P2 BodyMovement(s).
+[13:04:31.047] [AWJ_Split_Screen] Cleared legs list on 1 P2 MasterLegController(s).
+[13:04:31.048] [AWJ_Split_Screen] Set 1173 P2 GameObjects to layer 2 (Ignore Raycast).
+[13:04:31.092] [AWJ_Split_Screen] Excluded ground layers (21268800) from 14 P2 collider(s) so the body sits flush like P1 (speed-parity fix).
+[13:04:31.412] [AWJ_Split_Screen] Resolved P1 BodyMovement: PlayerSpider
+[13:04:31.510] [AWJ_Split_Screen] [P2WebManager] Init begin
+[13:04:31.555] [AWJ_Split_Screen] [P2WebManager] CameraController.mainCamera field cached: field=True inst=True
+[13:04:31.555] [AWJ_Split_Screen] [P2WebManager] CacheWebControllerMethods: shoot=True delete=True check=True quickBuild=True fixedAnchor=True movingAnchor=True deleteReleased=True | fields: bm=True wsp=True wm=True wbm=True wa=True sj=True wt=True wan=True pwj=True wtp=True wap=True
+[13:04:31.563] [AWJ_Split_Screen] [P2WebManager] P1 target params: maxDist=110(WebDistance(prop)) scale=0.3(WebColliderRadius(prop)) normalOffset=0.25(maxDistancePercentageWebNormal) origin=(-332.39, 233.40, -95.70)(WebStartPoint(Transform.position)) dir=(0.97, -0.23, 0.00)(WebDirection(Vector3))
+[13:04:31.564] [AWJ_Split_Screen] [P2WebManager] P1 WebStartPoint Transform: Root pos=(-332.39, 233.40, -95.70)
+[13:04:31.564] [AWJ_Split_Screen] [P2WebManager] WebStartPoint height -0.113 out of range, using default 1
+[13:04:31.565] [AWJ_Split_Screen] [P2WebManager] Cloned target dot from P1 webTargetGfx.
+[13:04:31.566] [AWJ_Split_Screen] [P2WebManager] Cloned anchor dot from P1 webAnchorGfx.
+[13:04:31.570] [AWJ_Split_Screen] [P2WebManager] Copied web line material from: Line width=1.500 mat=WebThread_SingleColor (Instance)
+[13:04:31.618] [AWJ_Split_Screen] [P2WebManager] Cached P2 web sound emitters: build=True, attach=True
+[13:04:31.663] [AWJ_Split_Screen] [P2WebManager] P2 web state ready. bm=True root=True wt=True wa=True wj=True
+[13:04:31.663] [AWJ_Split_Screen] [P2WebManager] Initialized. | ShootWeb=True | DeleteWeb=True | CheckForWebTarget=True | Rigidbody=True | TargetDot=True | P1MaxDist=110 | P1Scale=0.3 | P2Offset=0.25 | WebStartHeight=1.00
+[13:04:31.707] [AWJ_Split_Screen] Spawned P2: PlayerSpider_P2 | P2InputTransform=InputTransform | P2WebManager=True | P2SpiderInteraction=True
+[13:04:32.194] [AWJ Split Screen] [UpdateFix] Restored 50 P2 shell groups, removed 400 stale clones, mirrored 520 renderer layers, and disabled 1 P1-camera fluff LOD controller(s).
+[13:04:32.195] [AWJ Split Screen] [UpdateFix] Synced P2 visual mode with P1 (normal=True, alternate=False).
+[13:04:32.205] [AWJ Split Screen] [UpdateFix] P2 wind trail prepared with 1 particle system(s).
+[13:04:32.205] [AWJ Split Screen] [UpdateFix] Connected P2's wind trail to P2 velocity (activate=58.3, deactivate=33.3).
+[13:04:32.283] [AWJ Split Screen] [UpdateFix] P2 wind state: active=False speed=3.4 emitting=False playing=True particles=0 layer=3
+[13:04:34.242] [AWJ Split Screen] [UpdateFix] P2 wind state: active=False speed=0.0 emitting=False playing=True particles=0 layer=3
+[13:04:35.596] [AWJ_Split_Screen] [P1WebFallback] Recovered a missed P1 grapple press.
+[13:04:36.246] [AWJ Split Screen] [UpdateFix] P2 wind state: active=False speed=0.0 emitting=False playing=True particles=0 layer=3
+[13:04:38.260] [AWJ Split Screen] [UpdateFix] P2 wind state: active=False speed=0.0 emitting=False playing=True particles=0 layer=3
+[13:04:43.872] [AWJ Split Screen] [UpdateFix] P2 wind state: active=False speed=0.0 emitting=False playing=True particles=0 layer=3
+[13:04:45.868] [AWJ Split Screen] [UpdateFix] P2 wind state: active=False speed=33.6 emitting=False playing=True particles=0 layer=3
+[13:04:46.326] [AWJ_Split_Screen] [P2WebManager] Played P2 grapple sound fallback.
+[13:04:47.883] [AWJ Split Screen] [UpdateFix] P2 wind state: active=True speed=67.8 emitting=True playing=True particles=3 layer=3
+[13:04:49.887] [AWJ Split Screen] [UpdateFix] P2 wind state: active=True speed=115.9 emitting=True playing=True particles=8 layer=3
+[13:04:51.884] [AWJ Split Screen] [UpdateFix] P2 wind state: active=False speed=0.0 emitting=False playing=True particles=0 layer=3
+[13:04:53.886] [AWJ Split Screen] [UpdateFix] P2 wind state: active=False speed=0.9 emitting=False playing=True particles=0 layer=3
+[13:04:53.910] [AWJ Split Screen] [UpdateFix] Woke a sleeping P2 rigidbody.
+[13:04:56.557] [AWJ_Split_Screen] Split-screen setup deferred until PlayerSpider has spawned.
+[13:05:00.361] Preferences Saved!
