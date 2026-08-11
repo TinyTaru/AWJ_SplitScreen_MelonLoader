@@ -44,6 +44,10 @@
       <HintPath>$(GameManagedPath)\UnityEngine.ParticleSystemModule.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <Reference Include="UnityEngine.AnimationModule" Condition="Exists('$(GameManagedPath)\UnityEngine.AnimationModule.dll')">
+      <HintPath>$(GameManagedPath)\UnityEngine.AnimationModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
     <Reference Include="UnityEngine.InputLegacyModule" Condition="Exists('$(GameManagedPath)\UnityEngine.InputLegacyModule.dll')">
       <HintPath>$(GameManagedPath)\UnityEngine.InputLegacyModule.dll</HintPath>
       <Private>false</Private>

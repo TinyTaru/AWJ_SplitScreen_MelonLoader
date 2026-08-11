@@ -95,6 +95,14 @@ namespace AWJSplitScreen
         private readonly List<ReanchoredTransformParent> _p1CloneReanchors = new List<ReanchoredTransformParent>();
         private readonly Dictionary<Camera, int> _globalEffectCameraMasks = new Dictionary<Camera, int>();
 
+        // Scene-load setup can fire before PlayerSpider's Start/leg-rig initialization has
+        // finished.  P2 is cloned from P1, so cloning that transient state can preserve a
+        // bad left/right leg pose.  A generation token also prevents overlapping
+        // sceneLoaded coroutines (e.g. additive scene loads) from tearing down/rebuilding
+        // split-screen on top of each other.
+        private int _setupGeneration;
+        private bool _currentSetupFromSceneLoad;
+
         private Vector3 _p2CamDir;        // direction from pivot to camera (normalized, derived from yaw/pitch)
         private Vector3 _p2SmoothUp;      // smoothed spider surface up (lerped each frame)
         private float _p2CamDistance;     // current dynamic distance (mirrors Cinemachine3rdPersonFollow.CameraDistance)
@@ -244,7 +252,8 @@ namespace AWJSplitScreen
 
         private void OnSceneLoaded(Scene scene, LoadSceneMode mode)
         {
-            MelonCoroutines.Start(DeferredSetup());
+            int generation = ++_setupGeneration;
+            MelonCoroutines.Start(DeferredSetup(true, generation));
         }
 
         private void OnBeginCameraRendering(ScriptableRenderContext context, Camera camera)
@@ -985,9 +994,19 @@ namespace AWJSplitScreen
             catch { return null; }
         }
 
-        private System.Collections.IEnumerator DeferredSetup()
+        private System.Collections.IEnumerator DeferredSetup(bool waitForP1Initialization, int generation)
         {
+            // sceneLoaded is earlier than Start() for a number of gameplay components.
+            // F9 is normally pressed long after that point, so only the automatic
+            // scene-load path needs the stronger readiness gate.
             yield return null;
+
+            // A newer sceneLoaded/F9 request supersedes this coroutine.  This matters for
+            // additive scene loads: without a token, an older coroutine can wake up later
+            // and tear down a P2 that a newer setup just created.
+            if (generation != _setupGeneration)
+                yield break;
+
             Teardown();
 
             // Scene loads destroy the P1 camera components these caches point at, so
@@ -1002,12 +1021,103 @@ namespace AWJSplitScreen
             if (_enabled != null && !_enabled.Value)
                 yield break;
 
+            if (waitForP1Initialization)
+            {
+                const float timeoutSeconds = 15f;
+                const float requiredStableSeconds = 0.50f;
+                const int requiredStableFrames = 8;
+
+                float deadline = Time.realtimeSinceStartup + timeoutSeconds;
+                float stableSince = -1f;
+                int stableFrames = 0;
+                int stablePlayerId = 0;
+                string lastReason = "PlayerSpider has not spawned";
+                bool ready = false;
+
+                while (Time.realtimeSinceStartup < deadline)
+                {
+                    if (generation != _setupGeneration)
+                        yield break;
+                    if (_enabled != null && !_enabled.Value)
+                        yield break;
+
+                    GameObject p1 = FindPlayerSpider();
+                    string reason;
+                    bool frameReady = IsP1SafeToCloneForP2(p1, out reason);
+                    int playerId = p1 != null ? p1.GetInstanceID() : 0;
+
+                    if (frameReady)
+                    {
+                        if (stablePlayerId != playerId)
+                        {
+                            stablePlayerId = playerId;
+                            stableSince = Time.realtimeSinceStartup;
+                            stableFrames = 1;
+                        }
+                        else
+                        {
+                            stableFrames++;
+                        }
+
+                        if (stableSince < 0f)
+                            stableSince = Time.realtimeSinceStartup;
+
+                        if (stableFrames >= requiredStableFrames &&
+                            Time.realtimeSinceStartup - stableSince >= requiredStableSeconds)
+                        {
+                            ready = true;
+                            break;
+                        }
+                    }
+                    else
+                    {
+                        stablePlayerId = playerId;
+                        stableSince = -1f;
+                        stableFrames = 0;
+                        lastReason = reason;
+                    }
+
+                    yield return null;
+                }
+
+                if (!ready)
+                {
+                    LoggerInstance.Warning(
+                        "Automatic P2 spawn skipped because P1 did not reach a safe clone-ready state within " +
+                        timeoutSeconds.ToString("F0") + "s. Last state: " + lastReason +
+                        ". F9 can still be used after the level finishes loading.");
+                    yield break;
+                }
+
+                // One extra rendered frame after the stable window guarantees that any
+                // Start/OnEnable work that made the readiness fields valid has returned
+                // before Instantiate snapshots P1.
+                yield return null;
+                if (generation != _setupGeneration)
+                    yield break;
+
+                LoggerInstance.Msg(
+                    "P1 is fully initialized for P2 cloning (leg targets + MasterLegController stable for " +
+                    requiredStableSeconds.ToString("F2") + "s).");
+            }
+            else if (!CanUseSplitScreenInCurrentScene())
+            {
+                LoggerInstance.Msg("Split-screen setup deferred until PlayerSpider has spawned.");
+                yield break;
+            }
+
+            // Re-check even after the readiness wait in case a scene transition destroyed
+            // P1 between the final validation frame and setup.
             if (!CanUseSplitScreenInCurrentScene())
             {
                 LoggerInstance.Msg("Split-screen setup deferred until PlayerSpider has spawned.");
                 yield break;
             }
 
+            if (generation != _setupGeneration)
+                yield break;
+
+            _currentSetupFromSceneLoad = waitForP1Initialization;
             SetupCameras();
             CacheWebController();
 
@@ -1025,6 +1135,198 @@ namespace AWJSplitScreen
             // Allow P2 (layer 2 = Ignore Raycast) into the snow/dust effect cameras'
             // culling masks so P2 also leaves snow trails / piano dust trails.
             ApplyP2LayerToGlobalEffectCameras();
+        }
+
+        /// <summary>
+        /// Returns true only after P1's runtime spider/leg state is actually initialized,
+        /// not merely after a GameObject named PlayerSpider exists.
+        ///
+        /// The key signal is LegController.targetLocal.  The game creates/populates those
+        /// runtime foot anchors during leg initialization.  Cloning before they exist (or
+        /// before MasterLegController has collected the legs) can snapshot a transient
+        /// animation/IK state.  This is exactly the window sceneLoaded can hit but a later
+        /// manual F9 spawn normally cannot.
+        /// </summary>
+        private static bool IsP1SafeToCloneForP2(GameObject p1, out string reason)
+        {
+            reason = null;
+            if (p1 == null)
+            {
+                reason = "PlayerSpider missing";
+                return false;
+            }
+
+            if (!p1.activeInHierarchy)
+            {
+                reason = "PlayerSpider inactive";
+                return false;
+            }
+
+            if (!p1.scene.IsValid() || !p1.scene.isLoaded)
+            {
+                reason = "PlayerSpider scene not loaded";
+                return false;
+            }
+
+            if (p1.GetComponent<Rigidbody>() == null)
+            {
+                reason = "root Rigidbody missing";
+                return false;
+            }
+
+            const BindingFlags flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+
+            // BodyMovement.Start establishes runtime references used by the clone path.
+            var bodyType = AccessTools.TypeByName("_Scripts.Spider.BodyMovement");
+            if (bodyType != null)
+            {
+                var body = p1.GetComponentInChildren(bodyType, true) as Component;
+                if (body == null)
+                {
+                    reason = "BodyMovement missing";
+                    return false;
+                }
+
+                var bodyBehaviour = body as Behaviour;
+                if (bodyBehaviour != null && !bodyBehaviour.isActiveAndEnabled)
+                {
+                    reason = "BodyMovement not active";
+                    return false;
+                }
+
+                var targetTransformField = bodyType.GetField("targetTransform", flags);
+                if (targetTransformField != null)
+                {
+                    Transform targetTransform = null;
+                    try { targetTransform = targetTransformField.GetValue(body) as Transform; } catch { }
+                    if (targetTransform == null)
+                    {
+                        reason = "BodyMovement.targetTransform not initialized";
+                        return false;
+                    }
+                }
+            }
+
+            var legType = AccessTools.TypeByName("_Scripts.Spider.LegController");
+            if (legType == null)
+            {
+                reason = "LegController type unavailable";
+                return false;
+            }
+
+            var legs = p1.GetComponentsInChildren(legType, true);
+            if (legs == null || legs.Length < 8)
+            {
+                reason = "only " + (legs == null ? 0 : legs.Length) + "/8 LegControllers present";
+                return false;
+            }
+
+            var targetField = legType.GetField("target", flags);
+            var centerField = legType.GetField("center", flags);
+            var targetLocalField = legType.GetField("targetLocal", flags);
+
+            for (int i = 0; i < legs.Length; i++)
+            {
+                var leg = legs[i];
+                var comp = leg as Component;
+                if (comp == null)
+                {
+                    reason = "null LegController component";
+                    return false;
+                }
+
+                if (targetField != null)
+                {
+                    Transform target = null;
+                    try { target = targetField.GetValue(leg) as Transform; } catch { }
+                    if (target == null)
+                    {
+                        reason = comp.name + ".target not initialized";
+                        return false;
+                    }
+                }
+
+                if (centerField != null)
+                {
+                    Transform center = null;
+                    try { center = centerField.GetValue(leg) as Transform; } catch { }
+                    if (center == null)
+                    {
+                        reason = comp.name + ".center not initialized";
+                        return false;
+                    }
+                }
+
+                // targetLocal is the strongest runtime-started signal. If this field exists
+                // in this game version, require every leg to have created its anchor.
+                if (targetLocalField != null)
+                {
+                    Transform targetLocal = null;
+                    try { targetLocal = targetLocalField.GetValue(leg) as Transform; } catch { }
+                    if (targetLocal == null)
+                    {
+                        reason = comp.name + ".targetLocal not initialized";
+                        return false;
+                    }
+                }
+            }
+
+            // MasterLegController's list is populated by the individual leg startup path.
+            var masterType = AccessTools.TypeByName("_Scripts.Spider.MasterLegController");
+            if (masterType != null)
+            {
+                var master = p1.GetComponentInChildren(masterType, true) as Component;
+                if (master == null)
+                {
+                    reason = "MasterLegController missing";
+                    return false;
+                }
+
+                var legsField = masterType.GetField("legs", flags);
+                if (legsField != null)
+                {
+                    int registeredCount = -1;
+                    try
+                    {
+                        var collection = legsField.GetValue(master) as System.Collections.ICollection;
+                        if (collection != null)
+                            registeredCount = collection.Count;
+                    }
+                    catch { }
+
+                    if (registeredCount >= 0 && registeredCount < legs.Length)
+                    {
+                        reason = "MasterLegController has only " + registeredCount + "/" + legs.Length + " registered legs";
+                        return false;
+                    }
+                }
+            }
+
+            // The visual rig should also have passed Animator initialization before it is
+            // cloned. Ignore inactive/disabled animators (alternate visual modes may keep
+            // some around intentionally).
+            var animators = p1.GetComponentsInChildren<Animator>(true);
+            bool sawActiveAnimator = false;
+            bool sawInitializedAnimator = false;
+            for (int i = 0; i < animators.Length; i++)
+            {
+                var animator = animators[i];
+                if (animator == null || !animator.enabled || !animator.gameObject.activeInHierarchy)
+                    continue;
+
+                sawActiveAnimator = true;
+                if (animator.isInitialized)
+                    sawInitializedAnimator = true;
+            }
+
+            if (sawActiveAnimator && !sawInitializedAnimator)
+            {
+                reason = "Animator not initialized";
+                return false;
+            }
+
+            reason = "ready";
+            return true;
         }
 
         private void ApplyP2LayerToGlobalEffectCameras()
@@ -1075,6 +1377,10 @@ namespace AWJSplitScreen
 
             if (InputCompat.Down_F9())
             {
+                // Invalidate any scene-load setup coroutine before applying the manual
+                // toggle.  Manual F9 occurs after gameplay is interactable, so it does not
+                // need the scene-start stabilization delay.
+                int generation = ++_setupGeneration;
                 _enabled.Value = !_enabled.Value;
                 if (_enabled.Value)
                 {
@@ -1085,7 +1391,7 @@ namespace AWJSplitScreen
                     }
                     else
                     {
-                        MelonCoroutines.Start(DeferredSetup());
+                        MelonCoroutines.Start(DeferredSetup(false, generation));
                         LoggerInstance.Msg("Split-screen enabled.");
                     }
                 }
@@ -1676,6 +1982,33 @@ namespace AWJSplitScreen
 
             _p2Spider.AddComponent<P2Marker>();
 
+            // IMPORTANT: isolate P2 colliders BEFORE any P2LegDriver performs its first
+            // ground cast. Previously this happened much later in SetupSecondSpider(), after
+            // every P2 leg had already called Init(). On a level-entry spawn the cloned leg
+            // pose can still be folded/settling, so a leg cast could hit P2's own body/leg
+            // collider and parent its private foot anchor to that moving transform. Once the
+            // rig moved, the anchor moved to the opposite side even though the IK target and
+            // leg binding were correct. F9 is far less likely to reproduce because the pose
+            // is already stable.
+            try
+            {
+                var earlyP2Colliders = _p2Spider.GetComponentsInChildren<Collider>(true);
+                int earlyLayered = 0;
+                for (int i = 0; i < earlyP2Colliders.Length; i++)
+                {
+                    var c = earlyP2Colliders[i];
+                    if (c == null) continue;
+                    c.gameObject.layer = 2; // Ignore Raycast; excluded by whatIsGround.
+                    earlyLayered++;
+                }
+                LoggerInstance.Msg("Pre-isolated " + earlyLayered +
+                    " P2 collider GameObject(s) from leg ground casts before leg initialization.");
+            }
+            catch (Exception ex)
+            {
+                LoggerInstance.Warning("Failed early P2 collider isolation (non-fatal): " + ex.Message);
+            }
+
             var p2RootRb = _p2Spider.GetComponent<Rigidbody>();
             if (p2RootRb != null && p2RootRb.interpolation == RigidbodyInterpolation.None)
             {
@@ -1745,24 +2078,120 @@ namespace AWJSplitScreen
                         }
                     }
 
-                    // First pass: collect raw LegController data, destroy, create drivers
+                    // Build the P2 leg drivers from P1's CANONICAL live references, not from the
+                    // cloned LegController fields.  Instantiate() remaps serialized references, but these
+                    // LegControllers also contain runtime Transform references.  During scene startup the
+                    // active clone can run lifecycle code before we destroy it, and a transient/mis-remapped
+                    // target is enough to make (for example) Left_1 drive the right-side IK target.
+                    //
+                    // Match each P2 LegController to its P1 counterpart by the exact child-index path in the
+                    // cloned hierarchy, then map P1 target/center/jump/opposing references into P2 using the
+                    // same path.  This makes leg identity deterministic regardless of clone timing.
                     var p2Legs = _p2Spider.GetComponentsInChildren(legType3, true);
                     var drivers = new P2LegDriver[p2Legs.Length];
+                    var p1LegForIndex = new Component[p2Legs.Length];
+                    var p1LegIndexById = new Dictionary<int, int>();
+                    var p2LegIndexById = new Dictionary<int, int>();
+                    int canonicalLegMappings = 0;
+
                     for (int i = 0; i < p2Legs.Length; i++)
                     {
-                        var lc = p2Legs[i];
-                        var go = (lc as Component).gameObject;
-                        var target3     = targetF3?.GetValue(lc) as Transform;
-                        var offset3     = offsetF3 != null ? (Vector3)offsetF3.GetValue(lc) : Vector3.zero;
-                        var center3     = centerF3?.GetValue(lc) as Transform;
-                        var targetJump3 = targetJumpF3?.GetValue(lc) as Transform;
+                        var p2Leg = p2Legs[i] as Component;
+                        if (p2Leg == null) continue;
+                        p2LegIndexById[p2Leg.GetInstanceID()] = i;
 
-                        UnityEngine.Object.DestroyImmediate(lc);
+                        Transform p1LegTransform = MapTransformBetweenCloneRoots(
+                            _p2Spider.transform, _p1Spider.transform, p2Leg.transform);
+                        Component p1Leg = p1LegTransform != null
+                            ? p1LegTransform.GetComponent(legType3) as Component
+                            : null;
+                        p1LegForIndex[i] = p1Leg;
+                        if (p1Leg != null)
+                        {
+                            p1LegIndexById[p1Leg.GetInstanceID()] = i;
+                            canonicalLegMappings++;
+                        }
+                    }
+
+                    var opposingIndices = new List<int>[p2Legs.Length];
+                    for (int i = 0; i < p2Legs.Length; i++)
+                    {
+                        opposingIndices[i] = new List<int>();
+                        Component canonicalLeg = p1LegForIndex[i] ?? (p2Legs[i] as Component);
+                        bool sourceIsP1 = p1LegForIndex[i] != null;
+                        if (canonicalLeg == null || opposingF3 == null) continue;
+
+                        try
+                        {
+                            var authoredOpposing = opposingF3.GetValue(canonicalLeg) as System.Collections.IEnumerable;
+                            if (authoredOpposing == null) continue;
+
+                            foreach (var opposing in authoredOpposing)
+                            {
+                                var opposingComponent = opposing as Component;
+                                if (opposingComponent == null) continue;
+
+                                int partnerIndex;
+                                bool found = sourceIsP1
+                                    ? p1LegIndexById.TryGetValue(opposingComponent.GetInstanceID(), out partnerIndex)
+                                    : p2LegIndexById.TryGetValue(opposingComponent.GetInstanceID(), out partnerIndex);
+                                if (found && partnerIndex >= 0 && partnerIndex < p2Legs.Length && partnerIndex != i)
+                                    opposingIndices[i].Add(partnerIndex);
+                            }
+                        }
+                        catch { }
+                    }
+
+                    for (int i = 0; i < p2Legs.Length; i++)
+                    {
+                        var p2Leg = p2Legs[i] as Component;
+                        if (p2Leg == null) continue;
+
+                        var go = p2Leg.gameObject;
+                        Component canonicalLeg = p1LegForIndex[i] ?? p2Leg;
+                        bool sourceIsP1 = p1LegForIndex[i] != null;
+
+                        Transform sourceTarget = targetF3?.GetValue(canonicalLeg) as Transform;
+                        Transform sourceCenter = centerF3?.GetValue(canonicalLeg) as Transform;
+                        Transform sourceTargetJump = targetJumpF3?.GetValue(canonicalLeg) as Transform;
+
+                        Transform target3 = sourceIsP1
+                            ? MapTransformBetweenCloneRoots(_p1Spider.transform, _p2Spider.transform, sourceTarget)
+                            : sourceTarget;
+                        Transform center3 = sourceIsP1
+                            ? MapTransformBetweenCloneRoots(_p1Spider.transform, _p2Spider.transform, sourceCenter)
+                            : sourceCenter;
+                        Transform targetJump3 = sourceIsP1
+                            ? MapTransformBetweenCloneRoots(_p1Spider.transform, _p2Spider.transform, sourceTargetJump)
+                            : sourceTargetJump;
+
+                        // If a particular runtime reference lives outside PlayerSpider, path mapping cannot
+                        // clone it.  Fall back only that reference to the P2 clone's own field rather than
+                        // discarding the whole canonical mapping.
+                        if (target3 == null)
+                            target3 = targetF3?.GetValue(p2Leg) as Transform;
+                        if (center3 == null)
+                            center3 = centerF3?.GetValue(p2Leg) as Transform;
+                        if (targetJump3 == null)
+                            targetJump3 = targetJumpF3?.GetValue(p2Leg) as Transform;
+
+                        Vector3 offset3 = Vector3.zero;
+                        if (offsetF3 != null)
+                        {
+                            try { offset3 = (Vector3)offsetF3.GetValue(canonicalLeg); }
+                            catch
+                            {
+                                try { offset3 = (Vector3)offsetF3.GetValue(p2Leg); } catch { }
+                            }
+                        }
+
+                        UnityEngine.Object.DestroyImmediate(p2Leg);
 
                         if (target3 != null && p2BodyTransform != null)
                         {
                             var driver = go.AddComponent<P2LegDriver>();
                             driver.Init(target3, offset3, center3, p2BodyTransform,
+                                _p1Spider.transform, _p2Spider.transform,
                                 p2BodyMovement, moveVecField,
                                 whatIsGround, sphereRadius,
                                 rayUpOffset, rayLength, stepDist,
@@ -1770,22 +2199,60 @@ namespace AWJSplitScreen
                                 targetJump3);
                             drivers[i] = driver;
                         }
+                        else
+                        {
+                            LoggerInstance.Warning("Could not map canonical P2 leg target for " + go.name +
+                                " (P1 source=" + (sourceIsP1 ? "yes" : "no") + ").");
+                        }
                     }
 
-                    // Second pass: wire up opposing-leg pairs (alternate-gait)
+                    // Preserve P1's authored opposing-leg relationships after the deterministic mapping.
                     for (int i = 0; i < drivers.Length; i++)
                     {
                         if (drivers[i] == null) continue;
-                        int partner = (i % 2 == 0) ? i + 1 : i - 1;
-                        if (partner >= 0 && partner < drivers.Length && drivers[partner] != null)
-                            drivers[i].SetOpposingLegs(new P2LegDriver[] { drivers[partner] });
+
+                        var mappedOpposing = new List<P2LegDriver>();
+                        if (opposingIndices[i] != null)
+                        {
+                            for (int oi = 0; oi < opposingIndices[i].Count; oi++)
+                            {
+                                int partnerIndex = opposingIndices[i][oi];
+                                if (partnerIndex >= 0 && partnerIndex < drivers.Length &&
+                                    drivers[partnerIndex] != null && drivers[partnerIndex] != drivers[i])
+                                {
+                                    mappedOpposing.Add(drivers[partnerIndex]);
+                                }
+                            }
+                        }
+
+                        if (mappedOpposing.Count == 0)
+                        {
+                            int fallbackPartner = (i % 2 == 0) ? i + 1 : i - 1;
+                            if (fallbackPartner >= 0 && fallbackPartner < drivers.Length && drivers[fallbackPartner] != null)
+                                mappedOpposing.Add(drivers[fallbackPartner]);
+                        }
+
+                        drivers[i].SetOpposingLegs(mappedOpposing.ToArray());
                     }
-                    LoggerInstance.Msg("Replaced " + p2Legs.Length + " LegController(s) with P2LegDriver on P2.");
+
+                    LoggerInstance.Msg("Replaced " + p2Legs.Length +
+                        " LegController(s) with P2LegDriver; canonical P1 hierarchy mappings=" +
+                        canonicalLegMappings + "/" + p2Legs.Length + ".");
                 }
 
                 // Keep RigBuilder/Rig alive — the IK system drives visual bones toward
                 // target positions. P2LegDriver updates targets without raycasts.
-                // Rebuild RigBuilder so IK binds to P2's own bones.
+                // Before rebuilding the PlayableGraph, rewrite every Transform reference in
+                // Animation Rigging constraint data from P1's canonical hierarchy into the
+                // corresponding P2 transform.  This removes a second possible source of a
+                // left-target/right-bone swap: a cloned constraint carrying a transient runtime
+                // reference even though the P2LegDriver itself owns the correct target.
+                int canonicalConstraintRefs = CanonicalizeP2AnimationRigConstraintReferences(_p1Spider, _p2Spider);
+                int canonicalRigLayers = CanonicalizeP2RigBuilderLayerReferences(_p1Spider, _p2Spider);
+                LoggerInstance.Msg("Canonicalized P2 Animation Rigging references from P1: constraintTransforms=" +
+                    canonicalConstraintRefs + " rigLayers=" + canonicalRigLayers + ".");
+
+                // Rebuild RigBuilder so IK binds to the canonical P2 bones/targets.
                 Type rigBuilderType = null;
                 foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
                 {
@@ -1795,12 +2262,44 @@ namespace AWJSplitScreen
                 if (rigBuilderType != null)
                 {
                     var rigBuilders = _p2Spider.GetComponentsInChildren(rigBuilderType, true);
+                    MethodInfo clearMethod = null;
                     MethodInfo buildMethod = null;
                     foreach (var m in rigBuilderType.GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic))
-                        if (m.Name == "Build" && m.GetParameters().Length == 0) { buildMethod = m; break; }
+                    {
+                        if (m.GetParameters().Length != 0) continue;
+                        if (m.Name == "Clear") clearMethod = m;
+                        else if (m.Name == "Build") buildMethod = m;
+                    }
+
+                    int cleared = 0;
+                    int built = 0;
                     for (int ri = 0; ri < rigBuilders.Length; ri++)
-                        buildMethod?.Invoke(rigBuilders[ri], null);
-                    LoggerInstance.Msg("Rebuilt " + rigBuilders.Length + " RigBuilder(s) on P2.");
+                    {
+                        var rigBuilder = rigBuilders[ri];
+                        if (rigBuilder == null) continue;
+                        try
+                        {
+                            // A cloned active RigBuilder can already own a PlayableGraph created during
+                            // Instantiate/OnEnable. Calling Build() again without Clear() can leave the
+                            // clone using stale bindings. Destroy that graph first, then build once from
+                            // P2's final cloned constraint/bone references.
+                            if (clearMethod != null)
+                            {
+                                clearMethod.Invoke(rigBuilder, null);
+                                cleared++;
+                            }
+                            if (buildMethod != null)
+                            {
+                                buildMethod.Invoke(rigBuilder, null);
+                                built++;
+                            }
+                        }
+                        catch (Exception rigEx)
+                        {
+                            LoggerInstance.Warning("P2 RigBuilder clear/build failed (non-fatal): " + rigEx.Message);
+                        }
+                    }
+                    LoggerInstance.Msg("Reset P2 Animation Rigging graph(s): cleared=" + cleared + ", built=" + built + ".");
                 }
             }
             catch (Exception ex)
@@ -1976,6 +2475,14 @@ namespace AWJSplitScreen
                                " | P2InputTransform=" + (P2InputTransform != null ? P2InputTransform.name : "null") +
                                " | P2WebManager=" + (_p2WebManager != null) +
                                " | P2SpiderInteraction=" + (_p2SpiderInteraction != null));
+
+            // Automatic scene spawning happens while unrelated level Start/OnEnable methods can
+            // still run.  F9 spawning later does not have that race.  Re-assert the canonical
+            // leg/constraint bindings after the wind fix's one-frame P2 lifecycle pulse and again
+            // after scene startup has had time to settle.  The repair is idempotent and only rebuilds
+            // the rig when the same P1/P2 instances are still alive.
+            if (_currentSetupFromSceneLoad)
+                MelonCoroutines.Start(DelayedP2LegBindingRepair(_p1Spider, _p2Spider));
         }
 
         private void CacheP2InteractionRefs()
@@ -3002,6 +3509,571 @@ namespace AWJSplitScreen
                 var comp = comps[i] as UnityEngine.Object;
                 if (comp != null)
                     UnityEngine.Object.Destroy(comp);
+            }
+        }
+
+
+        // Maps a Transform from one cloned PlayerSpider hierarchy to the corresponding
+        // Transform in the other hierarchy.  We use name + same-name ordinal at every
+        // level instead of raw sibling index so UpdateFix removing unrelated cloned
+        // children cannot invalidate a delayed repair.
+        private static Transform MapTransformBetweenCloneRoots(Transform sourceRoot, Transform destinationRoot, Transform source)
+        {
+            if (sourceRoot == null || destinationRoot == null || source == null)
+                return null;
+            if (object.ReferenceEquals(source, sourceRoot))
+                return destinationRoot;
+
+            var names = new List<string>();
+            var ordinals = new List<int>();
+            Transform cursor = source;
+            while (cursor != null && !object.ReferenceEquals(cursor, sourceRoot))
+            {
+                Transform parent = cursor.parent;
+                if (parent == null)
+                    return null;
+
+                int sameNameOrdinal = 0;
+                int siblingIndex = cursor.GetSiblingIndex();
+                for (int i = 0; i < siblingIndex; i++)
+                {
+                    Transform sibling = parent.GetChild(i);
+                    if (sibling != null && string.Equals(sibling.name, cursor.name, StringComparison.Ordinal))
+                        sameNameOrdinal++;
+                }
+
+                names.Add(cursor.name);
+                ordinals.Add(sameNameOrdinal);
+                cursor = parent;
+            }
+
+            if (!object.ReferenceEquals(cursor, sourceRoot))
+                return null;
+
+            Transform mapped = destinationRoot;
+            for (int seg = names.Count - 1; seg >= 0; seg--)
+            {
+                string wantedName = names[seg];
+                int wantedOrdinal = ordinals[seg];
+                int seen = 0;
+                Transform next = null;
+                for (int c = 0; c < mapped.childCount; c++)
+                {
+                    Transform child = mapped.GetChild(c);
+                    if (child == null || !string.Equals(child.name, wantedName, StringComparison.Ordinal))
+                        continue;
+                    if (seen == wantedOrdinal)
+                    {
+                        next = child;
+                        break;
+                    }
+                    seen++;
+                }
+                if (next == null)
+                    return null;
+                mapped = next;
+            }
+            return mapped;
+        }
+
+        private static int GetComponentOrdinal(Component component)
+        {
+            if (component == null) return -1;
+            Component[] siblings = component.gameObject.GetComponents(component.GetType());
+            for (int i = 0; i < siblings.Length; i++)
+                if (object.ReferenceEquals(siblings[i], component))
+                    return i;
+            return -1;
+        }
+
+        private static Component MapComponentBetweenCloneRoots(GameObject sourceRoot, GameObject destinationRoot, Component source)
+        {
+            if (sourceRoot == null || destinationRoot == null || source == null)
+                return null;
+
+            Transform mappedTransform = MapTransformBetweenCloneRoots(sourceRoot.transform, destinationRoot.transform, source.transform);
+            if (mappedTransform == null)
+                return null;
+
+            Component[] candidates = mappedTransform.gameObject.GetComponents(source.GetType());
+            int ordinal = GetComponentOrdinal(source);
+            if (ordinal >= 0 && ordinal < candidates.Length)
+                return candidates[ordinal];
+            return candidates.Length > 0 ? candidates[0] : null;
+        }
+
+        // Rewrites direct Transform members in Animation Rigging constraint data from
+        // P1 to the equivalent P2 hierarchy.  TwoBoneIKConstraintData exposes root,
+        // mid, tip, target and hint as Transform properties; the generic reflection here
+        // also covers other Animation Rigging constraints that use direct Transform refs.
+        private static int CanonicalizeP2AnimationRigConstraintReferences(GameObject p1Root, GameObject p2Root)
+        {
+            if (p1Root == null || p2Root == null)
+                return 0;
+
+            int changedRefs = 0;
+            const BindingFlags flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+            MonoBehaviour[] p1Behaviours = p1Root.GetComponentsInChildren<MonoBehaviour>(true);
+            for (int i = 0; i < p1Behaviours.Length; i++)
+            {
+                MonoBehaviour p1Constraint = p1Behaviours[i];
+                if (p1Constraint == null) continue;
+
+                Type constraintType = p1Constraint.GetType();
+                string ns = constraintType.Namespace ?? string.Empty;
+                if (!ns.StartsWith("UnityEngine.Animations.Rigging", StringComparison.Ordinal) ||
+                    constraintType.Name.IndexOf("Constraint", StringComparison.OrdinalIgnoreCase) < 0)
+                    continue;
+
+                Component p2Constraint = MapComponentBetweenCloneRoots(p1Root, p2Root, p1Constraint);
+                if (p2Constraint == null)
+                    continue;
+
+                PropertyInfo dataProperty = constraintType.GetProperty("data", flags);
+                FieldInfo dataField = constraintType.GetField("m_Data", flags);
+                object p1Data = null;
+                object p2Data = null;
+                try
+                {
+                    if (dataProperty != null && dataProperty.CanRead)
+                    {
+                        p1Data = dataProperty.GetValue(p1Constraint, null);
+                        p2Data = dataProperty.GetValue(p2Constraint, null);
+                    }
+                    else if (dataField != null)
+                    {
+                        p1Data = dataField.GetValue(p1Constraint);
+                        p2Data = dataField.GetValue(p2Constraint);
+                    }
+                }
+                catch { continue; }
+
+                if (p1Data == null || p2Data == null)
+                    continue;
+
+                bool dataChanged = false;
+                Type dataType = p1Data.GetType();
+
+                PropertyInfo[] properties = dataType.GetProperties(flags);
+                for (int pi = 0; pi < properties.Length; pi++)
+                {
+                    PropertyInfo prop = properties[pi];
+                    if (prop.PropertyType != typeof(Transform) || !prop.CanRead || !prop.CanWrite ||
+                        prop.GetIndexParameters().Length != 0)
+                        continue;
+                    try
+                    {
+                        Transform p1Ref = prop.GetValue(p1Data, null) as Transform;
+                        Transform mapped = MapTransformBetweenCloneRoots(p1Root.transform, p2Root.transform, p1Ref);
+                        if (mapped == null) continue;
+                        Transform current = prop.GetValue(p2Data, null) as Transform;
+                        if (!object.ReferenceEquals(current, mapped))
+                        {
+                            prop.SetValue(p2Data, mapped, null);
+                            changedRefs++;
+                            dataChanged = true;
+                        }
+                    }
+                    catch { }
+                }
+
+                FieldInfo[] fields = dataType.GetFields(flags);
+                for (int fi = 0; fi < fields.Length; fi++)
+                {
+                    FieldInfo field = fields[fi];
+                    if (field.FieldType != typeof(Transform) || field.IsInitOnly)
+                        continue;
+                    try
+                    {
+                        Transform p1Ref = field.GetValue(p1Data) as Transform;
+                        Transform mapped = MapTransformBetweenCloneRoots(p1Root.transform, p2Root.transform, p1Ref);
+                        if (mapped == null) continue;
+                        Transform current = field.GetValue(p2Data) as Transform;
+                        if (!object.ReferenceEquals(current, mapped))
+                        {
+                            field.SetValue(p2Data, mapped);
+                            changedRefs++;
+                            dataChanged = true;
+                        }
+                    }
+                    catch { }
+                }
+
+                if (!dataChanged)
+                    continue;
+
+                try
+                {
+                    if (dataProperty != null && dataProperty.CanWrite)
+                        dataProperty.SetValue(p2Constraint, p2Data, null);
+                    else if (dataField != null)
+                        dataField.SetValue(p2Constraint, p2Data);
+                }
+                catch (Exception ex)
+                {
+                    MelonLogger.Warning("[P2LegBinding] Could not write canonical rig data for " +
+                        constraintType.Name + ": " + ex.Message);
+                }
+            }
+            return changedRefs;
+        }
+
+
+        private static int CanonicalizeP2RigBuilderLayerReferences(GameObject p1Root, GameObject p2Root)
+        {
+            if (p1Root == null || p2Root == null)
+                return 0;
+
+            Type rigBuilderType = null;
+            foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+            {
+                rigBuilderType = asm.GetType("UnityEngine.Animations.Rigging.RigBuilder");
+                if (rigBuilderType != null) break;
+            }
+            if (rigBuilderType == null)
+                return 0;
+
+            const BindingFlags flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+            int changed = 0;
+            var p1Builders = p1Root.GetComponentsInChildren(rigBuilderType, true);
+            for (int bi = 0; bi < p1Builders.Length; bi++)
+            {
+                Component p1Builder = p1Builders[bi] as Component;
+                if (p1Builder == null) continue;
+                Component p2Builder = MapComponentBetweenCloneRoots(p1Root, p2Root, p1Builder);
+                if (p2Builder == null) continue;
+
+                PropertyInfo layersProp = rigBuilderType.GetProperty("layers", flags);
+                FieldInfo layersField = rigBuilderType.GetField("m_RigLayers", flags);
+                object p1LayersObj = null;
+                object p2LayersObj = null;
+                try
+                {
+                    if (layersProp != null && layersProp.CanRead)
+                    {
+                        p1LayersObj = layersProp.GetValue(p1Builder, null);
+                        p2LayersObj = layersProp.GetValue(p2Builder, null);
+                    }
+                    else if (layersField != null)
+                    {
+                        p1LayersObj = layersField.GetValue(p1Builder);
+                        p2LayersObj = layersField.GetValue(p2Builder);
+                    }
+                }
+                catch { continue; }
+
+                var p1Layers = p1LayersObj as System.Collections.IList;
+                var p2Layers = p2LayersObj as System.Collections.IList;
+                if (p1Layers == null || p2Layers == null)
+                    continue;
+
+                int count = Math.Min(p1Layers.Count, p2Layers.Count);
+                for (int li = 0; li < count; li++)
+                {
+                    object p1Layer = p1Layers[li];
+                    object p2Layer = p2Layers[li];
+                    if (p1Layer == null || p2Layer == null) continue;
+
+                    Type layerType = p1Layer.GetType();
+                    PropertyInfo rigProp = layerType.GetProperty("rig", flags);
+                    FieldInfo rigField = layerType.GetField("rig", flags) ?? layerType.GetField("m_Rig", flags);
+                    Component p1Rig = null;
+                    Component p2Rig = null;
+                    try
+                    {
+                        if (rigProp != null && rigProp.CanRead)
+                        {
+                            p1Rig = rigProp.GetValue(p1Layer, null) as Component;
+                            p2Rig = rigProp.GetValue(p2Layer, null) as Component;
+                        }
+                        else if (rigField != null)
+                        {
+                            p1Rig = rigField.GetValue(p1Layer) as Component;
+                            p2Rig = rigField.GetValue(p2Layer) as Component;
+                        }
+                    }
+                    catch { continue; }
+
+                    Component mappedRig = MapComponentBetweenCloneRoots(p1Root, p2Root, p1Rig);
+                    if (mappedRig == null || object.ReferenceEquals(mappedRig, p2Rig))
+                        continue;
+
+                    try
+                    {
+                        if (rigProp != null && rigProp.CanWrite)
+                            rigProp.SetValue(p2Layer, mappedRig, null);
+                        else if (rigField != null && !rigField.IsInitOnly)
+                            rigField.SetValue(p2Layer, mappedRig);
+                        else
+                            continue;
+                        changed++;
+                    }
+                    catch { }
+                }
+            }
+            return changed;
+        }
+
+        private static int RebindP2LegDriversFromP1(GameObject p1Root, GameObject p2Root)
+        {
+            if (p1Root == null || p2Root == null)
+                return 0;
+
+            Type legType = AccessTools.TypeByName("_Scripts.Spider.LegController");
+            if (legType == null)
+                return 0;
+
+            const BindingFlags flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+            FieldInfo targetField = legType.GetField("target", flags);
+            FieldInfo centerField = legType.GetField("center", flags);
+            FieldInfo jumpField = legType.GetField("targetJump", flags);
+            if (targetField == null)
+                return 0;
+
+            int rebound = 0;
+            P2LegDriver[] drivers = p2Root.GetComponentsInChildren<P2LegDriver>(true);
+            for (int i = 0; i < drivers.Length; i++)
+            {
+                P2LegDriver driver = drivers[i];
+                if (driver == null) continue;
+
+                Transform p1LegTransform = MapTransformBetweenCloneRoots(p2Root.transform, p1Root.transform, driver.transform);
+                Component p1Leg = p1LegTransform != null ? p1LegTransform.GetComponent(legType) as Component : null;
+                if (p1Leg == null) continue;
+
+                Transform p1Target = targetField.GetValue(p1Leg) as Transform;
+                Transform p1Center = centerField != null ? centerField.GetValue(p1Leg) as Transform : null;
+                Transform p1Jump = jumpField != null ? jumpField.GetValue(p1Leg) as Transform : null;
+
+                Transform p2Target = MapTransformBetweenCloneRoots(p1Root.transform, p2Root.transform, p1Target);
+                Transform p2Center = MapTransformBetweenCloneRoots(p1Root.transform, p2Root.transform, p1Center);
+                Transform p2Jump = MapTransformBetweenCloneRoots(p1Root.transform, p2Root.transform, p1Jump);
+
+                if (driver.RebindAuthoredTransforms(p2Target, p2Center, p2Jump))
+                    rebound++;
+            }
+            return rebound;
+        }
+
+        private static void RebuildP2RigBuilders(GameObject p2Root, out int cleared, out int built)
+        {
+            cleared = 0;
+            built = 0;
+            if (p2Root == null) return;
+
+            Type rigBuilderType = null;
+            foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+            {
+                rigBuilderType = asm.GetType("UnityEngine.Animations.Rigging.RigBuilder");
+                if (rigBuilderType != null) break;
+            }
+            if (rigBuilderType == null) return;
+
+            MethodInfo clearMethod = rigBuilderType.GetMethod("Clear",
+                BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+                null, Type.EmptyTypes, null);
+            MethodInfo buildMethod = rigBuilderType.GetMethod("Build",
+                BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+                null, Type.EmptyTypes, null);
+
+            var builders = p2Root.GetComponentsInChildren(rigBuilderType, true);
+            for (int i = 0; i < builders.Length; i++)
+            {
+                object builder = builders[i];
+                if (builder == null) continue;
+                try
+                {
+                    if (clearMethod != null)
+                    {
+                        clearMethod.Invoke(builder, null);
+                        cleared++;
+                    }
+                    if (buildMethod != null)
+                    {
+                        buildMethod.Invoke(builder, null);
+                        built++;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    MelonLogger.Warning("[P2LegBinding] RigBuilder clear/build failed: " + ex.Message);
+                }
+            }
+        }
+
+        private System.Collections.IEnumerator DelayedP2LegBindingRepair(GameObject p1Root, GameObject p2Root)
+        {
+            // Unity Explorer isolated the actual scene-entry failure:
+            // - P2's Animator is normally disabled after cloning.
+            // - Animator.Rebind() while it is disabled does not repair the legs.
+            // - Temporarily enabling that Animator and disabling it again DOES immediately
+            //   restore the correct underlying leg-bone pose.
+            // - P1 only relaxes slightly when an IK constraint is removed, whereas the bad
+            //   P2 leg crosses the body when its IK weight is set to zero.  Therefore the bad
+            //   state exists below TwoBoneIK: P2 can inherit/freeze a transient base Animator
+            //   pose during automatic level-entry cloning.
+            //
+            // Reproduce the proven Unity Explorer action once, after UpdateFix's required
+            // PlayerSpider_P2 root lifecycle pulse has completed.  Keep the Animator enabled
+            // for one real frame so Unity evaluates the skeleton, then restore its original
+            // disabled state.  F9 spawning does not need this because it occurs after P1's
+            // visual pose is already stable.
+            float[] checkpoints = { 0.60f, 1.20f, 2.00f };
+            float started = Time.realtimeSinceStartup;
+            bool scenePoseSettled = false;
+            bool animatorPoseRefreshed = false;
+
+            for (int ci = 0; ci < checkpoints.Length; ci++)
+            {
+                float due = started + checkpoints[ci];
+                while (Time.realtimeSinceStartup < due)
+                {
+                    if (p1Root == null || p2Root == null || !object.ReferenceEquals(_p2Spider, p2Root))
+                        yield break;
+                    yield return null;
+                }
+
+                if (p1Root == null || p2Root == null || !object.ReferenceEquals(_p2Spider, p2Root))
+                    yield break;
+
+                // Only automatic scene-entry spawning reaches this coroutine.  Pulse the
+                // disabled Animator once at the first checkpoint where P2 is active.  Prefer
+                // the root Animator (the one confirmed in Unity Explorer); only fall back to
+                // active child Animators if the root has none.
+                int animatorPulsed = 0;
+                if (!animatorPoseRefreshed && p2Root.activeInHierarchy)
+                {
+                    var animatorsToPulse = new List<Animator>();
+                    Animator rootAnimator = p2Root.GetComponent<Animator>();
+                    if (rootAnimator != null)
+                    {
+                        if (!rootAnimator.enabled && rootAnimator.gameObject.activeInHierarchy)
+                            animatorsToPulse.Add(rootAnimator);
+                    }
+                    else
+                    {
+                        Animator[] childAnimators = p2Root.GetComponentsInChildren<Animator>(true);
+                        for (int ai = 0; ai < childAnimators.Length; ai++)
+                        {
+                            Animator animator = childAnimators[ai];
+                            if (animator == null || animator.enabled || !animator.gameObject.activeInHierarchy)
+                                continue;
+                            animatorsToPulse.Add(animator);
+                        }
+                    }
+
+                    if (animatorsToPulse.Count > 0)
+                    {
+                        for (int ai = 0; ai < animatorsToPulse.Count; ai++)
+                        {
+                            Animator animator = animatorsToPulse[ai];
+                            if (animator == null) continue;
+                            try
+                            {
+                                animator.enabled = true;
+                                // A zero-delta evaluation makes the intent explicit while the
+                                // component is enabled; the following real frame matches the
+                                // manual Unity Explorer enable/disable test exactly.
+                                animator.Update(0f);
+                                animatorPulsed++;
+                            }
+                            catch (Exception ex)
+                            {
+                                LoggerInstance.Warning("[P2AnimatorPose] Failed to enable/evaluate " + animator.name + ": " + ex.Message);
+                            }
+                        }
+
+                        LoggerInstance.Msg("[P2AnimatorPose] Enabled " + animatorPulsed +
+                            " previously-disabled P2 Animator(s) for one frame to normalize the cloned bone pose.");
+
+                        // Let Unity run one normal Animator evaluation / transform write pass.
+                        yield return null;
+
+                        // Always restore the mod/game's intended disabled state before doing
+                        // any target settling or RigBuilder work.
+                        for (int ai = 0; ai < animatorsToPulse.Count; ai++)
+                        {
+                            Animator animator = animatorsToPulse[ai];
+                            if (animator == null) continue;
+                            try
+                            {
+                                if (animator.enabled)
+                                {
+                                    animator.Update(0f);
+                                    animator.enabled = false;
+                                }
+                            }
+                            catch (Exception ex)
+                            {
+                                LoggerInstance.Warning("[P2AnimatorPose] Failed to restore disabled Animator " + animator.name + ": " + ex.Message);
+                            }
+                        }
+
+                        LoggerInstance.Msg("[P2AnimatorPose] Restored P2 Animator disabled state after one-frame pose refresh.");
+                        animatorPoseRefreshed = true;
+
+                        if (p1Root == null || p2Root == null || !object.ReferenceEquals(_p2Spider, p2Root))
+                            yield break;
+                    }
+                    else
+                    {
+                        // If no disabled active Animator exists, do not keep retrying forever.
+                        // This also avoids touching alternate/inactive visual-mode animators.
+                        animatorPoseRefreshed = true;
+                        LoggerInstance.Msg("[P2AnimatorPose] No disabled active P2 Animator required a pose refresh.");
+                    }
+                }
+
+                int reboundDrivers = RebindP2LegDriversFromP1(p1Root, p2Root);
+
+                int forcedPoseSettles = 0;
+                int playerAnchorsRepaired = 0;
+                int crossedTargetsRepaired = 0;
+                P2LegDriver[] drivers = p2Root.GetComponentsInChildren<P2LegDriver>(true);
+                for (int di = 0; di < drivers.Length; di++)
+                {
+                    P2LegDriver driver = drivers[di];
+                    if (driver == null) continue;
+
+                    if (driver.RepairPlayerOwnedAnchorIfNeeded("post-scene t=" + checkpoints[ci].ToString("F2") + "s"))
+                        playerAnchorsRepaired++;
+
+                    if (!scenePoseSettled)
+                    {
+                        if (driver.ForceSceneSpawnSettle("post-scene t=" + checkpoints[ci].ToString("F2") + "s"))
+                            forcedPoseSettles++;
+                    }
+                    else if (driver.RepairCrossedTargetIfNeeded("post-scene t=" + checkpoints[ci].ToString("F2") + "s"))
+                    {
+                        crossedTargetsRepaired++;
+                    }
+                }
+
+                // All drivers share the same BodyMovement state, so a nonzero settle count
+                // normally means all eight were re-seated. If P2 was still in Jumping state,
+                // the count remains zero and the next checkpoint tries again.
+                if (forcedPoseSettles > 0)
+                    scenePoseSettled = true;
+
+                int changedConstraintRefs = CanonicalizeP2AnimationRigConstraintReferences(p1Root, p2Root);
+                int changedRigLayers = CanonicalizeP2RigBuilderLayerReferences(p1Root, p2Root);
+                int cleared = 0, built = 0;
+
+                // After the Animator pulse, rebuild once when the feet are force-settled so
+                // Animation Rigging consumes the normalized base-bone pose plus canonical
+                // targets. Subsequent no-op checkpoints leave the graph alone.
+                if (reboundDrivers > 0 || changedConstraintRefs > 0 || changedRigLayers > 0 || forcedPoseSettles > 0)
+                    RebuildP2RigBuilders(p2Root, out cleared, out built);
+
+                LoggerInstance.Msg("[P2LegBinding] post-scene repair t=" + checkpoints[ci].ToString("F2") +
+                    "s: animatorPulsed=" + animatorPulsed +
+                    " driversRebound=" + reboundDrivers +
+                    " forcedPoseSettles=" + forcedPoseSettles +
+                    " playerAnchorsRepaired=" + playerAnchorsRepaired +
+                    " crossedTargetsRepaired=" + crossedTargetsRepaired +
+                    " constraintRefsChanged=" + changedConstraintRefs +
+                    " rigLayersChanged=" + changedRigLayers +
+                    " rigCleared=" + cleared + " rigBuilt=" + built + ".");
             }
         }
 
@@ -5248,10 +6320,19 @@ namespace AWJSplitScreen
         private Transform _target;
         // Local "foot anchor" parented to the hit surface so feet track moving geometry
         private Transform _targetLocal;
-        // Center transform — rest position of this leg, used for step-distance check
+        // Center transform — authored rest position of this leg.  This is the most
+        // reliable left/right identity for the leg, so it is also used as the ray origin.
         private Transform _center;
+        // Vanilla LegController's authored offset.  Older P2 code read this value but
+        // discarded it completely; keep it as a fallback when a leg has no center.
+        private Vector3 _startingOffset;
         // Spider body transform (provides forward/up for anticipatory cast)
         private Transform _bodyTransform;
+        // Player roots excluded from all leg ground casts. A planted foot may be parented
+        // to real moving world geometry, but never to either spider's body/leg hierarchy.
+        private Transform _p1Root;
+        private Transform _p2Root;
+        private readonly RaycastHit[] _castBuffer = new RaycastHit[64];
         // BodyMovement component + moveVector field for anticipation
         private Component _bodyMovement;
         private FieldInfo _moveVecField;
@@ -5272,6 +6353,10 @@ namespace AWJSplitScreen
         private bool _inited;
         private bool _resetLeg;
         private bool _instantReset;
+        private bool _postInitEnableRefreshed;
+        private bool _loggedCrossSideReject;
+        private bool _loggedPlayerSurfaceReject;
+        private int _crossedTargetRepairCount;
 
         private P2LegDriver[] _opposingLegs;
 
@@ -5284,11 +6369,41 @@ namespace AWJSplitScreen
 
         public void SetOpposingLegs(P2LegDriver[] legs) { _opposingLegs = legs; }
 
+        internal bool RebindAuthoredTransforms(Transform target, Transform center, Transform targetJump)
+        {
+            bool changed = false;
+            if (target != null && !object.ReferenceEquals(_target, target))
+            {
+                _target = target;
+                changed = true;
+            }
+            if (center != null && !object.ReferenceEquals(_center, center))
+            {
+                _center = center;
+                changed = true;
+            }
+            if (targetJump != null && !object.ReferenceEquals(_targetJump, targetJump))
+            {
+                _targetJump = targetJump;
+                changed = true;
+            }
+
+            // If target identity changed, immediately put the newly-canonical IK target at
+            // this driver's existing foot anchor so the repair itself does not cause a step.
+            if (changed && _target != null && _targetLocal != null)
+            {
+                _target.position = _targetLocal.position;
+                _target.rotation = _targetLocal.rotation;
+            }
+            return changed;
+        }
+
         // Jump pose transform (mirrors LegController.targetJump)
         private Transform _targetJump;
 
         public void Init(Transform target, Vector3 startingOffset, Transform center,
-            Transform bodyTransform, Component bodyMovement, FieldInfo moveVecField,
+            Transform bodyTransform, Transform p1Root, Transform p2Root,
+            Component bodyMovement, FieldInfo moveVecField,
             LayerMask whatIsGround, float sphereRadius,
             float rayUpOffset, float rayLength, float stepDist,
             float stepTime, float stepHeight, float tipHeight, float newTargetDist,
@@ -5296,7 +6411,10 @@ namespace AWJSplitScreen
         {
             _target = target;
             _center = center;
+            _startingOffset = startingOffset;
             _bodyTransform = bodyTransform;
+            _p1Root = p1Root;
+            _p2Root = p2Root;
             _bodyMovement = bodyMovement;
             _targetJump = targetJump;
             _moveVecField = moveVecField;
@@ -5311,40 +6429,249 @@ namespace AWJSplitScreen
             _newTargetDist = Mathf.Max(newTargetDist, 0.05f);
             _scale = Mathf.Max(transform.lossyScale.x, 0.01f);
 
-            // Create a dedicated targetLocal child GameObject (mirrors original LegController)
+            // Create a dedicated targetLocal child GameObject (mirrors original LegController).
             var tlGo = new GameObject("P2LegTargetLocal_" + gameObject.name);
             _targetLocal = tlGo.transform;
             _targetLocal.SetParent(null, false);
 
-            // Initial placement: try raycast downward from leg root
-            var origin = transform.position + _bodyTransform.up * _rayUpOffset * _scale;
+            // Seed from the already-cloned IK target FIRST.  That pose was copied from the
+            // correct P1 leg by Unity, so it preserves leg identity even if P2 is spawned
+            // next to awkward geometry.  The previous implementation immediately replaced
+            // this with a sphere-cast from the LegController GameObject, which could rarely
+            // choose a surface on the opposite side of the spider.
+            _targetLocal.position = _target.position;
+            _targetLocal.rotation = _target.rotation;
+
+            // If the cloned target itself is already across the body centerline, do not
+            // preserve that bad pose.  This can happen if a cloned runtime reference was
+            // carrying transient P1 leg state at exactly the wrong spawn moment.
+            if (!IsPointOnOwnSide(_targetLocal.position))
+            {
+                LogCrossSideReject(_targetLocal.position);
+                _targetLocal.position = GetHomePosition() - _bodyTransform.up * _scale * 0.5f;
+                _targetLocal.rotation = transform.rotation;
+            }
+
+            // Then settle onto the surface below this leg's authored CENTER, not the
+            // controller object's transform.  The center is unique to each of the eight
+            // legs and therefore cannot silently swap left/right ownership.
+            var origin = GetHomePosition() + _bodyTransform.up * _rayUpOffset * _scale;
             var ray = new Ray(origin, -_bodyTransform.up);
             RaycastHit hit;
             if (CheckLegSphereCast(ray, out hit))
-            {
                 PlaceTargetLocal(hit);
-                _lerp = 1f;
-                if (_target != null)
-                {
-                    _target.position = _targetLocal.position;
-                    _target.rotation = _targetLocal.rotation;
-                }
-            }
-            else
-            {
-                _targetLocal.position = transform.position - _bodyTransform.up * _scale * 0.5f;
-                _targetLocal.rotation = Quaternion.LookRotation(
-                    Vector3.Cross(transform.right, _bodyTransform.up), _bodyTransform.up);
-                _lerp = 1f;
-            }
+
+            _lerp = 1f;
+            _target.position = _targetLocal.position;
+            _target.rotation = _targetLocal.rotation;
             _oldTarget = _targetLocal.position;
             _inited = true;
+        }
+
+        private void OnEnable()
+        {
+            // AddComponent invokes OnEnable before Init(), so the first useful OnEnable is
+            // the later P2 root lifecycle refresh.  Re-settle once after that refresh using
+            // this leg's own authored center.  This removes spawn-order dependence without
+            // continually snapping feet during normal play.
+            if (!_inited || _postInitEnableRefreshed || _targetLocal == null || _target == null)
+                return;
+
+            _postInitEnableRefreshed = true;
+            if (IsBodyJumping())
+                return;
+
+            var origin = GetHomePosition() + _bodyTransform.up * _rayUpOffset * _scale;
+            RaycastHit hit;
+            if (CheckLegSphereCast(new Ray(origin, -_bodyTransform.up), out hit))
+            {
+                PlaceTargetLocal(hit);
+                _target.position = _targetLocal.position;
+                _target.rotation = _targetLocal.rotation;
+                _oldTarget = _targetLocal.position;
+                _lerp = 1f;
+            }
         }
 
         private void OnDestroy()
         {
             if (_targetLocal != null)
                 UnityEngine.Object.Destroy(_targetLocal.gameObject);
+        }
+
+        private Vector3 GetHomePosition()
+        {
+            if (_center != null)
+                return _center.position;
+
+            // startingOffset is only a fallback for unusual game builds where center is
+            // missing.  TransformPoint preserves the original controller's local axes.
+            if (_startingOffset.sqrMagnitude > 0.000001f)
+                return transform.TransformPoint(_startingOffset);
+
+            return transform.position;
+        }
+
+        /// <summary>
+        /// Scene-entry-only hard reset used after P2's body/ground orientation has had a
+        /// chance to settle. This does not copy a pose from P1 and does not guess a leg
+        /// index: it raycasts from THIS leg's authored center using P2's CURRENT body axes.
+        /// F9 spawning does not call this path.
+        /// </summary>
+        internal bool ForceSceneSpawnSettle(string reason)
+        {
+            if (!_inited || _target == null || _targetLocal == null || _bodyTransform == null)
+                return false;
+            if (IsBodyJumping())
+                return false;
+
+            ForceSettleFromOwnCenter();
+
+            try
+            {
+                Vector3 homeLocal = _bodyTransform.InverseTransformPoint(GetHomePosition());
+                Vector3 targetLocal = _bodyTransform.InverseTransformPoint(_target.position);
+                MelonLogger.Msg("[P2LegDriver] Scene-spawn settle " + gameObject.name +
+                    " reason=" + reason +
+                    " homeLocal=" + homeLocal.ToString("F3") +
+                    " targetLocal=" + targetLocal.ToString("F3") + ".");
+            }
+            catch { }
+            return true;
+        }
+
+        /// <summary>
+        /// Repairs the concrete bad-parent state caught by the scene-entry logs: a private
+        /// foot anchor parented under P1/P2 instead of real world geometry. Such an anchor
+        /// moves with the spider animation even when the IK target itself was initially right.
+        /// </summary>
+        internal bool RepairPlayerOwnedAnchorIfNeeded(string reason)
+        {
+            if (!_inited || _target == null || _targetLocal == null || _bodyTransform == null)
+                return false;
+
+            Transform parent = _targetLocal.parent;
+            if (!IsPlayerOwnedSurface(parent))
+                return false;
+
+            string parentName = GetTransformPath(parent);
+            ForceSettleFromOwnCenter();
+            try
+            {
+                MelonLogger.Warning("[P2LegDriver] Repaired player-owned foot anchor for " +
+                    gameObject.name + " reason=" + reason + " oldParent=" + parentName + ".");
+            }
+            catch { }
+            return true;
+        }
+
+        /// <summary>
+        /// Scene-start diagnostic/safety repair for a clearly cross-sided existing target.
+        /// This is intentionally NOT run every frame during normal play because a planted
+        /// world-space foot can legitimately cross the body's local center while turning.
+        /// </summary>
+        internal bool RepairCrossedTargetIfNeeded(string reason)
+        {
+            if (!_inited || _target == null || _targetLocal == null || _bodyTransform == null || _center == null)
+                return false;
+            if (IsBodyJumping())
+                return false;
+
+            bool anchorCrossed = !IsPointOnOwnSide(_targetLocal.position);
+            bool ikTargetCrossed = !IsPointOnOwnSide(_target.position);
+            if (!anchorCrossed && !ikTargetCrossed)
+                return false;
+
+            Vector3 oldAnchor = _targetLocal.position;
+            Vector3 oldTarget = _target.position;
+
+            // If only the IK target drifted/came out of the rig in a bad pose while our
+            // private foot anchor is still valid, restore the target directly. Otherwise
+            // re-seat the anchor from this leg's own center against current ground.
+            if (!anchorCrossed)
+            {
+                _target.position = _targetLocal.position;
+                _target.rotation = _targetLocal.rotation;
+                _oldTarget = _targetLocal.position;
+                _lerp = 1f;
+                _resetLeg = false;
+                _instantReset = false;
+            }
+            else
+            {
+                ForceSettleFromOwnCenter();
+            }
+
+            _crossedTargetRepairCount++;
+            if (_crossedTargetRepairCount <= 4)
+            {
+                try
+                {
+                    Vector3 homeLocal = _bodyTransform.InverseTransformPoint(GetHomePosition());
+                    Vector3 oldAnchorLocal = _bodyTransform.InverseTransformPoint(oldAnchor);
+                    Vector3 oldTargetLocal = _bodyTransform.InverseTransformPoint(oldTarget);
+                    Vector3 newTargetLocal = _bodyTransform.InverseTransformPoint(_target.position);
+                    MelonLogger.Warning("[P2LegDriver] Repaired crossed leg target for " + gameObject.name +
+                        " reason=" + reason +
+                        " home=" + homeLocal.ToString("F3") +
+                        " oldAnchor=" + oldAnchorLocal.ToString("F3") +
+                        " oldIK=" + oldTargetLocal.ToString("F3") +
+                        " newIK=" + newTargetLocal.ToString("F3") + ".");
+                }
+                catch { }
+            }
+            return true;
+        }
+
+        private void ForceSettleFromOwnCenter()
+        {
+            if (_targetLocal == null || _target == null || _bodyTransform == null)
+                return;
+
+            // Remove any old surface parent before computing the new world-space foot pose.
+            _targetLocal.SetParent(null, true);
+
+            Vector3 homePosition = GetHomePosition();
+            Vector3 origin = homePosition + _bodyTransform.up * _rayUpOffset * _scale;
+            RaycastHit hit;
+            if (CheckLegSphereCast(new Ray(origin, -_bodyTransform.up), out hit))
+            {
+                PlaceTargetLocal(hit);
+            }
+            else
+            {
+                // No usable ground hit (spawn transition, midair, unusual geometry). Keep
+                // the fallback on the leg's own side by deriving it from its authored center.
+                _targetLocal.SetParent(null, true);
+                _targetLocal.position = homePosition - _bodyTransform.up * Mathf.Max(0.25f * _scale, _tipHeight * _scale);
+                _targetLocal.rotation = transform.rotation;
+            }
+
+            _target.position = _targetLocal.position;
+            _target.rotation = _targetLocal.rotation;
+            _oldTarget = _targetLocal.position;
+            _lerp = 1f;
+            _resetLeg = false;
+            _instantReset = false;
+        }
+
+        private bool IsPointOnOwnSide(Vector3 worldPoint)
+        {
+            if (_bodyTransform == null || _center == null)
+                return true;
+
+            Vector3 homeLocal = _bodyTransform.InverseTransformPoint(_center.position);
+            Vector3 pointLocal = _bodyTransform.InverseTransformPoint(worldPoint);
+            float sideTolerance = Mathf.Max(0.02f, 0.05f * _scale);
+
+            // A leg is allowed to approach the center line, but never initialize/step
+            // clearly across it.  This is orientation independent because the comparison
+            // is done in the spider body's local right/left axis, so walls and ceilings are
+            // handled the same way as floors.
+            if (Mathf.Abs(homeLocal.x) <= sideTolerance || Mathf.Abs(pointLocal.x) <= sideTolerance)
+                return true;
+
+            return Mathf.Sign(homeLocal.x) == Mathf.Sign(pointLocal.x);
         }
 
         private bool IsBodyJumping()
@@ -5389,12 +6716,21 @@ namespace AWJSplitScreen
                 var tlGo = new GameObject("P2LegTargetLocal_" + gameObject.name);
                 _targetLocal = tlGo.transform;
                 _targetLocal.SetParent(null, false);
-                _targetLocal.position = transform.position - _bodyTransform.up * _scale * 0.5f;
+                _targetLocal.position = GetHomePosition() - _bodyTransform.up * _scale * 0.5f;
                 _targetLocal.rotation = transform.rotation;
                 _oldTarget = _targetLocal.position;
                 _lerp = 1f;
             }
             bool jumping = IsBodyJumping();
+
+            // Hard invariant: a planted foot anchor may never remain parented to either
+            // PlayerSpider hierarchy. A surface-parented anchor is supposed to follow moving
+            // WORLD geometry; if it is parented to a spider body/leg collider it will be
+            // dragged around by that spider's animation and can appear on the wrong side.
+            // Do not enforce left/right centerline every frame here: a correctly planted foot
+            // can legitimately cross the body's local centerline while the spider rotates.
+            if (!jumping)
+                RepairPlayerOwnedAnchorIfNeeded("runtime player-surface guard");
 
             if (jumping)
             {
@@ -5460,18 +6796,21 @@ namespace AWJSplitScreen
 
         private void CheckLegPosition()
         {
-            // Compute ray origin with optional move-vector anticipation
+            // Compute the ray from this leg's authored home/center.  Using the
+            // LegController GameObject itself here was subtly unsafe: depending on clone
+            // lifecycle its transform can be shared/central while the center remains the
+            // unambiguous per-leg rest position.
+            Vector3 homePosition = GetHomePosition();
             Vector3 rayOrigin;
             if (_resetLeg)
             {
-                rayOrigin = transform.position
-                    + transform.forward * 0f
+                rayOrigin = homePosition
                     + _bodyTransform.up * _rayUpOffset * _scale;
             }
             else
             {
                 var moveY = GetMoveVectorY();
-                rayOrigin = transform.position
+                rayOrigin = homePosition
                     + _bodyTransform.up * _rayUpOffset * _scale
                     + _bodyTransform.forward * moveY * _stepDist * _scale;
             }
@@ -5571,21 +6910,138 @@ namespace AWJSplitScreen
 
         private bool CheckLegSphereCast(Ray ray, out RaycastHit hit)
         {
-            // Mirrors original: Raycast first, then 4 SphereCasts with increasing radius
-            if (Physics.Raycast(ray, out hit, _rayLength * _scale, _whatIsGround))
+            // Preserve vanilla's search order (ray first, then 4 increasing sphere radii),
+            // but choose the nearest ACCEPTABLE hit rather than blindly accepting Unity's
+            // first collider. P2 must never plant a foot on either spider hierarchy.
+            // This is the key scene-entry fix: P2's first casts used to happen before its
+            // collider layers were changed, so a folded startup pose could self-hit.
+            float distance = _rayLength * _scale;
+            int count = Physics.RaycastNonAlloc(ray, _castBuffer, distance, _whatIsGround);
+            if (TrySelectGroundHit(count, out hit))
                 return true;
+
             for (int i = 1; i <= 4; i++)
             {
                 float r = _sphereRadius * _scale * i * 0.25f;
-                if (Physics.SphereCast(ray, r, out hit, _rayLength * _scale, _whatIsGround))
+                count = Physics.SphereCastNonAlloc(ray, r, _castBuffer, distance, _whatIsGround);
+                if (TrySelectGroundHit(count, out hit))
                     return true;
             }
+
             hit = default;
             return false;
         }
 
+        private bool TrySelectGroundHit(int count, out RaycastHit hit)
+        {
+            bool found = false;
+            float bestDistance = float.PositiveInfinity;
+            RaycastHit best = default;
+
+            int limit = Mathf.Min(count, _castBuffer.Length);
+            for (int i = 0; i < limit; i++)
+            {
+                RaycastHit candidate = _castBuffer[i];
+                Transform surface = candidate.transform;
+                if (surface == null)
+                    continue;
+
+                if (IsPlayerOwnedSurface(surface))
+                {
+                    LogPlayerSurfaceReject(surface, candidate.point);
+                    continue;
+                }
+
+                if (!IsPointOnOwnSide(candidate.point))
+                {
+                    LogCrossSideReject(candidate.point);
+                    continue;
+                }
+
+                if (!found || candidate.distance < bestDistance)
+                {
+                    found = true;
+                    bestDistance = candidate.distance;
+                    best = candidate;
+                }
+            }
+
+            hit = best;
+            return found;
+        }
+
+        private bool IsPlayerOwnedSurface(Transform t)
+        {
+            if (t == null) return false;
+
+            if (_p2Root != null && (object.ReferenceEquals(t, _p2Root) || t.IsChildOf(_p2Root)))
+                return true;
+            if (_p1Root != null && (object.ReferenceEquals(t, _p1Root) || t.IsChildOf(_p1Root)))
+                return true;
+
+            return false;
+        }
+
+        private void LogPlayerSurfaceReject(Transform surface, Vector3 point)
+        {
+            if (_loggedPlayerSurfaceReject) return;
+            _loggedPlayerSurfaceReject = true;
+
+            try
+            {
+                Vector3 pointLocal = _bodyTransform == null
+                    ? Vector3.zero
+                    : _bodyTransform.InverseTransformPoint(point);
+                MelonLogger.Warning("[P2LegDriver] Rejected player-owned ground hit for " +
+                    gameObject.name + " surface=" + GetTransformPath(surface) +
+                    " pointLocal=" + pointLocal.ToString("F3") + ".");
+            }
+            catch { }
+        }
+
+        private static string GetTransformPath(Transform t)
+        {
+            if (t == null) return "null";
+            try
+            {
+                string path = t.name;
+                Transform p = t.parent;
+                int guard = 0;
+                while (p != null && guard++ < 12)
+                {
+                    path = p.name + "/" + path;
+                    p = p.parent;
+                }
+                return path;
+            }
+            catch { return t.name; }
+        }
+
+        private void LogCrossSideReject(Vector3 point)
+        {
+            if (_loggedCrossSideReject)
+                return;
+            _loggedCrossSideReject = true;
+
+            try
+            {
+                Vector3 homeLocal = _bodyTransform == null ? Vector3.zero : _bodyTransform.InverseTransformPoint(GetHomePosition());
+                Vector3 pointLocal = _bodyTransform == null ? Vector3.zero : _bodyTransform.InverseTransformPoint(point);
+                MelonLogger.Warning("[P2LegDriver] Rejected cross-side foot candidate for " + gameObject.name +
+                    " homeLocal=" + homeLocal.ToString("F3") + " hitLocal=" + pointLocal.ToString("F3") + ".");
+            }
+            catch { }
+        }
+
         private void PlaceTargetLocal(RaycastHit hit)
         {
+            if (hit.transform == null || IsPlayerOwnedSurface(hit.transform))
+            {
+                if (hit.transform != null)
+                    LogPlayerSurfaceReject(hit.transform, hit.point);
+                return;
+            }
+
             _targetLocal.position = hit.point + hit.normal * _tipHeight * _scale;
             var fwd = Vector3.Cross(transform.right, hit.normal);
             _targetLocal.rotation = Quaternion.LookRotation(fwd, hit.normal);
