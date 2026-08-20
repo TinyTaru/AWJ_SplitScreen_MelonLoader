@@ -23,6 +23,10 @@
     <None Include="ilspy_WebController\**\*.cs" />
     <Compile Remove="ilspy_GameCode\**\*.cs" />
     <None Include="ilspy_GameCode\**\*.cs" />
+    <Compile Remove="decompiled_GameCode*\**\*.cs" />
+    <Compile Remove="temp_playerinput\**\*.cs" />
+    <None Include="decompiled_GameCode*\**\*.cs" />
+    <None Include="temp_playerinput\**\*.cs" />
     <Compile Remove="wind-trail-handoff\**\*.cs" />
     <None Include="wind-trail-handoff\**\*.cs" />
   </ItemGroup>

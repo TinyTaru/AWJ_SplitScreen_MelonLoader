@@ -128,7 +128,11 @@ namespace AWJSplitScreenUpdateFix
             isPlayerField = bodyMovementType.GetField("isPlayer", flags);
             jumpTimerField = bodyMovementType.GetField("jumpTimer", flags);
             bodyStateProperty = bodyMovementType.GetProperty("State", flags);
-            webControllerType = AccessTools.TypeByName("_Scripts.Singletons.WebController");
+            // WebController became a forwarding facade in the multiplayer update.
+            // The live swing state is now owned by WebBuilder; using the facade here
+            // leaves webActive/springJoint null and makes P2 fall as if unattached.
+            webControllerType = AccessTools.TypeByName("_Scripts.Web.WebBuilder")
+                ?? AccessTools.TypeByName("_Scripts.Singletons.WebController");
             webActiveField = webControllerType == null ? null : webControllerType.GetField("webActive", flags);
             webSpringJointField = webControllerType == null ? null : webControllerType.GetField("springJoint", flags);
             webBodyMovementField = webControllerType == null ? null : webControllerType.GetField("bodyMovement", flags);

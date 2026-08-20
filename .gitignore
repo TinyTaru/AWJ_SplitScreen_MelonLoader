@@ -29,5 +29,16 @@ Desktop.ini
 # Game DLLs (local references - not for source control)
 lib/
 
-# Decompiled game source (ilspy dump) - copyrighted game code, not for a public repo
-ilspy_WebController/
+# Decompiled game source (ILSpy/decompiler dumps) - copyrighted game code, not for a public repo
+/ilspy_WebController/
+/ilspy_GameCode/
+/decompiled_GameCode/
+/decompiled_GameCode_*/
+/temp_playerinput/
+/decompiled_GameCode*.zip
+/ilspy_GameCode*.zip
+**/*decompiled*.cs
+**/*Decompiled*.cs
+**/*.decompiled.cs
+**/decompiled/
+**/Decompiled/

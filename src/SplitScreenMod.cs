@@ -3,12 +3,13 @@ using UnityEngine;
 using UnityEngine.Rendering;
 using UnityEngine.Rendering.Universal;
 using UnityEngine.SceneManagement;
+using UnityEngine.InputSystem;
 using System;
 using System.Collections.Generic;
 using System.Reflection;
 using HarmonyLib;
 
-[assembly: MelonInfo(typeof(AWJSplitScreen.SplitScreenMod), "AWJ Split Screen", "0.2.4", "TinyTaru", "https://github.com")]
+[assembly: MelonInfo(typeof(AWJSplitScreen.SplitScreenMod), "AWJ Split Screen", "0.2.5", "TinyTaru", "https://github.com")]
 [assembly: MelonGame("Fire Totem Games", "A Webbing Journey")]
 
 namespace AWJSplitScreen
@@ -166,6 +167,8 @@ namespace AWJSplitScreen
 
         private Component _webController;
         private P2WebManager _p2WebManager;
+        private PlayerInput _p1PlayerInput;
+        private int _p1PairedGamepadIndex = -1;
         private Component _p2SpiderInteraction;
         private MethodInfo _p2SpiderMobileInteractMethod;
         private MethodInfo _p1MobileShootWebMethod;
@@ -240,7 +243,7 @@ namespace AWJSplitScreen
             RenderPipelineManager.beginCameraRendering += OnBeginCameraRendering;
             RenderPipelineManager.endCameraRendering += OnEndCameraRendering;
 
-            LoggerInstance.Msg("AWJ Split Screen + P2 Inject v0.2.2 loaded.");
+            LoggerInstance.Msg("AWJ Split Screen + P2 Inject v0.2.5 loaded.");
             LoggerInstance.Msg("F8 swap controllers, F9 split, F10 orientation | P2 Move: IJKL or Gamepad LStick | P2 Sprint: LStick click (toggles on/off in all modes) | P2 Look: N/M or RStickX | P2 Zoom: RStick press | P2 Jump: A | P2 Interact: H/X | P2 Web: RT shoot/release, LT quick build, LB fixed anchor, RB moving anchor, B delete/cancel.");
             LoggerInstance.Msg("Diagnostics: set Debug_SpeedLog=true in MelonPreferences.cfg to log movement and detailed camera input/driver/pose state. Press F7 to dump all task/quest states.");
             LoggerInstance.Msg("Tip: If both controllers still move P1, ensure FilterP1FromP2Gamepad=true and P2_GamepadIndex is the second pad (usually 1).");
@@ -483,7 +486,29 @@ namespace AWJSplitScreen
                             prefix: new HarmonyMethod(typeof(SpiderInteractionPatches), nameof(SpiderInteractionPatches.TemporarilyEnableIsPlayer_Prefix)),
                             postfix: new HarmonyMethod(typeof(SpiderInteractionPatches), nameof(SpiderInteractionPatches.TemporarilyEnableIsPlayer_Postfix)));
 
-                    LoggerInstance.Msg("Patched SpiderInteraction: Start + TriggerEnter/Exit + MobileInteract for P2.");
+                    // The update now routes interaction actions through this component.
+                    // Ignore P2's callbacks here because P2 is driven by its dedicated
+                    // polling path; otherwise its X/South input also activates P1.
+                    int callbackCount = 0;
+                    if (!SkipCallbackContextPatches)
+                    {
+                        var methods = spiderInteractionType.GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                        for (int i = 0; i < methods.Length; i++)
+                        {
+                            var parameters = methods[i].GetParameters();
+                            if (parameters.Length != 1)
+                                continue;
+                            var parameterType = parameters[0].ParameterType;
+                            var typeName = parameterType != null ? parameterType.FullName : "";
+                            if (!string.Equals(parameterType != null ? parameterType.Name : "", "CallbackContext", StringComparison.Ordinal) &&
+                                (string.IsNullOrEmpty(typeName) || typeName.IndexOf("CallbackContext", StringComparison.OrdinalIgnoreCase) < 0))
+                                continue;
+                            h.Patch(methods[i], prefix: new HarmonyMethod(typeof(WebControllerPatches), nameof(WebControllerPatches.CallbackContextFilter_Prefix)));
+                            callbackCount++;
+                        }
+                    }
+
+                    LoggerInstance.Msg("Patched SpiderInteraction: Start + TriggerEnter/Exit + MobileInteract + CallbackContext filters=" + callbackCount + ".");
                 }
             }
             catch (Exception ex)
@@ -509,10 +534,13 @@ namespace AWJSplitScreen
                 LoggerInstance.Warning("LegController patch block failed (non-fatal): " + ex);
             }
 
-            // WebController patches
+            // Web input/state ownership moved from WebController to WebBuilder in the
+            // August 2026 multiplayer update.  Prefer the new owner, but retain the
+            // legacy controller path so one release still supports the older build.
             try
             {
-                var webType = AccessTools.TypeByName("_Scripts.Singletons.WebController");
+                var webType = AccessTools.TypeByName("_Scripts.Web.WebBuilder")
+                    ?? AccessTools.TypeByName("_Scripts.Singletons.WebController");
                 if (webType != null)
                 {
                     // NOTE: We intentionally do NOT patch Update/FixedUpdate with a P2ShootHeld setter.
@@ -556,7 +584,7 @@ namespace AWJSplitScreen
                         }
                     }
 
-                    LoggerInstance.Msg("Patched WebController: Update/Fixed + WebStartPoint/WebDirection + " + callbackCount + " CallbackContext filters.");
+                    LoggerInstance.Msg("Patched " + webType.Name + ": WebStartPoint/WebDirection + " + callbackCount + " CallbackContext filters.");
 
                     // CheckForWebTarget — separate try/catch because signature is void(float)
                     try
@@ -1426,6 +1454,8 @@ namespace AWJSplitScreen
 
             if (_enabled.Value)
             {
+                EnsureP1GamepadOwnership();
+
                 if (InputCompat.IsP2JumpPressedNow(P2UseGamepad, P2GamepadIndex))
                     P2JumpPressed = true;
 
@@ -1927,14 +1957,19 @@ namespace AWJSplitScreen
         {
             _webController = null;
 
-            var t = AccessTools.TypeByName("_Scripts.Singletons.WebController");
+            // In current builds WebController is a facade that forwards to
+            // PlayerManager.MainBuilder.  The actual fields (webActive,
+            // webStartPoint, springJoint, etc.) and all InputAction callbacks now live
+            // on WebBuilder, so state isolation must target that component directly.
+            var t = AccessTools.TypeByName("_Scripts.Web.WebBuilder")
+                ?? AccessTools.TypeByName("_Scripts.Singletons.WebController");
             if (t == null) return;
 
             var all = UnityEngine.Object.FindObjectsOfType(t, true);
             if (all != null && all.Length > 0)
                 _webController = all[0] as Component;
 
-            LoggerInstance.Msg("WebController cached: " + (_webController != null));
+            LoggerInstance.Msg("Web runtime cached: " + (_webController != null) + " (" + t.Name + ").");
         }
 
         private void SetupSecondSpider()
@@ -2470,6 +2505,7 @@ namespace AWJSplitScreen
             }
 
             CacheP2InteractionRefs();
+            EnsureP1GamepadOwnership();
 
             LoggerInstance.Msg("Spawned P2: " + _p2Spider.name +
                                " | P2InputTransform=" + (P2InputTransform != null ? P2InputTransform.name : "null") +
@@ -2483,6 +2519,60 @@ namespace AWJSplitScreen
             // the rig when the same P1/P2 instances are still alive.
             if (_currentSetupFromSceneLoad)
                 MelonCoroutines.Start(DelayedP2LegBindingRepair(_p1Spider, _p2Spider));
+        }
+
+        // The update switched P1 to PlayerInput device pairing.  P2 is intentionally
+        // polled directly by this mod, so leave the game's one PlayerInput paired to
+        // the other controller; otherwise it can auto-pair to P2 and all of P1's
+        // callbacks are (correctly) filtered out as P2 input.
+        private void EnsureP1GamepadOwnership()
+        {
+            if (_p2Spider == null || !P2UseGamepad)
+                return;
+
+            try
+            {
+                if (Gamepad.all.Count < 2)
+                    return;
+
+                int p1Index = -1;
+                for (int i = 0; i < Gamepad.all.Count; i++)
+                {
+                    if (i != P2GamepadIndex)
+                    {
+                        p1Index = i;
+                        break;
+                    }
+                }
+                if (p1Index < 0)
+                    return;
+
+                if (_p1PlayerInput == null && _p1Spider != null)
+                    _p1PlayerInput = _p1Spider.GetComponentInChildren<PlayerInput>(true);
+                if (_p1PlayerInput == null)
+                    return;
+
+                Gamepad p1Gamepad = Gamepad.all[p1Index];
+                bool alreadyPaired = _p1PlayerInput.devices.Count == 1 &&
+                    object.ReferenceEquals(_p1PlayerInput.devices[0], p1Gamepad);
+                if (alreadyPaired && _p1PairedGamepadIndex == p1Index)
+                    return;
+
+                _p1PlayerInput.neverAutoSwitchControlSchemes = true;
+                if (_p1PlayerInput.SwitchCurrentControlScheme(p1Gamepad))
+                {
+                    _p1PairedGamepadIndex = p1Index;
+                    LoggerInstance.Msg("Paired P1 PlayerInput to gamepad " + p1Index + " (P2 uses " + P2GamepadIndex + ").");
+                }
+                else
+                {
+                    LoggerInstance.Warning("Unable to pair P1 PlayerInput to gamepad " + p1Index + ".");
+                }
+            }
+            catch (Exception ex)
+            {
+                LoggerInstance.Warning("P1 controller pairing failed (non-fatal): " + ex.Message);
+            }
         }
 
         private void CacheP2InteractionRefs()
@@ -4308,6 +4398,8 @@ namespace AWJSplitScreen
             _p1ShootHeldPrev = false;
             _p2SpiderInteraction = null;
             _p2SpiderMobileInteractMethod = null;
+            _p1PlayerInput = null;
+            _p1PairedGamepadIndex = -1;
 
             _p1InputTransform = null;
             _p2CamRigInited = false;
@@ -4412,6 +4504,17 @@ namespace AWJSplitScreen
         private FieldInfo _fAttachToPlayerSound;
         private FieldInfo _fMusicThreadSound;
         private FieldInfo _fWebSound;
+        // WebBuilder 0.15.2 added a coyote-target/input-buffer system. These are
+        // targeting state, not presentation state: if they cross the P1/P2 capsule
+        // boundary, P1 can resolve P2's previous target on its next shoot press.
+        private FieldInfo _fLastTargetLocalPosition;
+        private FieldInfo _fLastTargetObject;
+        private FieldInfo _fLastWebTargetActive;
+        private FieldInfo _fWebCoyoteTimeActive;
+        private FieldInfo _fWebCoyoteTimeTimer;
+        private FieldInfo _fInputBufferActive;
+        private FieldInfo _fInputBufferTimer;
+        private FieldInfo _fBufferedInputAction;
         private AnimationCurve _webTargetSizeCurve;
         private float _webDistanceVal = 50f;
         // CameraController.mainCamera private field — game systems often access this
@@ -5016,7 +5119,9 @@ namespace AWJSplitScreen
                 _mFixedAnchor = _wcType.GetMethod("MobileFixedAnchor", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic, null, Type.EmptyTypes, null);
                 _mMovingAnchor = _wcType.GetMethod("MobileMovingAnchor", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic, null, Type.EmptyTypes, null);
                 _mDeleteWebReleased = _wcType.GetMethod("MobileDeleteWebButtonReleased", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic, null, Type.EmptyTypes, null);
-                _mDestroyAllPlayerWebs = _wcType.GetMethod("DestroyAllPlayerWebs", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic, null, Type.EmptyTypes, null);
+                _mDestroyAllPlayerWebs = _wcType.GetMethod("DestroyAllPlayerWebs", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic, null, new Type[] { typeof(bool), typeof(bool) }, null)
+                    ?? _wcType.GetMethod("DestroyAllPlayerWebs", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic, null, new Type[] { typeof(bool) }, null)
+                    ?? _wcType.GetMethod("DestroyAllPlayerWebs", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic, null, Type.EmptyTypes, null);
 
                 // Field reflection caches for the state-capsule swap.
                 _fBodyMovement = TryGetField("bodyMovement");
@@ -5055,6 +5160,14 @@ namespace AWJSplitScreen
                 _fAttachToPlayerSound = TryGetField("attachToPlayerSound");
                 _fMusicThreadSound = TryGetField("musicThreadSound");
                 _fWebSound = TryGetField("webSound");
+                _fLastTargetLocalPosition = TryGetField("lastTargetLocalPosition");
+                _fLastTargetObject = TryGetField("lastTargetObject");
+                _fLastWebTargetActive = TryGetField("lastWebTargetActive");
+                _fWebCoyoteTimeActive = TryGetField("webCoyoteTimeActive");
+                _fWebCoyoteTimeTimer = TryGetField("webCoyoteTimeTimer");
+                _fInputBufferActive = TryGetField("inputBufferActive");
+                _fInputBufferTimer = TryGetField("inputBufferTimer");
+                _fBufferedInputAction = TryGetField("bufferedInputAction");
                 try
                 {
                     if (_fWebTargetSize != null) _webTargetSizeCurve = _fWebTargetSize.GetValue(_p1WebController) as AnimationCurve;
@@ -5083,6 +5196,19 @@ namespace AWJSplitScreen
                             var instField = singletonType?.GetField("Instance", BindingFlags.Public | BindingFlags.Static)
                                 ?? singletonType?.GetField("Instance", BindingFlags.NonPublic | BindingFlags.Static);
                             if (instField != null) _ccInstance = instField.GetValue(null);
+                        }
+
+                        // Unity 6's updated Singleton base no longer exposes the
+                        // generic Instance member through the reflected base type in
+                        // this Mono runtime.  WebBuilder reads mainCamera's backing
+                        // field directly, so falling back to the live scene component
+                        // is essential: otherwise P2's target ray keeps using P1's
+                        // camera even while the P2 state capsule is active.
+                        if (_ccInstance == null)
+                        {
+                            var controllers = UnityEngine.Object.FindObjectsOfType(ccType, true);
+                            if (controllers != null && controllers.Length > 0)
+                                _ccInstance = controllers[0];
                         }
                         if (_logger != null)
                             _logger.Msg("[P2WebManager] CameraController.mainCamera field cached: field=" + (_fCcMainCamera != null) + " inst=" + (_ccInstance != null));
@@ -5240,6 +5366,14 @@ namespace AWJSplitScreen
                 if (_fAttachToPlayerSound != null) c.attachToPlayerSound = _fAttachToPlayerSound.GetValue(_p1WebController);
                 if (_fMusicThreadSound != null) c.musicThreadSound = _fMusicThreadSound.GetValue(_p1WebController);
                 if (_fWebSound != null) c.webSound = _fWebSound.GetValue(_p1WebController) as string;
+                if (_fLastTargetLocalPosition != null) c.lastTargetLocalPosition = _fLastTargetLocalPosition.GetValue(_p1WebController);
+                if (_fLastTargetObject != null) c.lastTargetObject = _fLastTargetObject.GetValue(_p1WebController);
+                if (_fLastWebTargetActive != null) c.lastWebTargetActive = (bool)_fLastWebTargetActive.GetValue(_p1WebController);
+                if (_fWebCoyoteTimeActive != null) c.webCoyoteTimeActive = (bool)_fWebCoyoteTimeActive.GetValue(_p1WebController);
+                if (_fWebCoyoteTimeTimer != null) c.webCoyoteTimeTimer = (float)_fWebCoyoteTimeTimer.GetValue(_p1WebController);
+                if (_fInputBufferActive != null) c.inputBufferActive = (bool)_fInputBufferActive.GetValue(_p1WebController);
+                if (_fInputBufferTimer != null) c.inputBufferTimer = (float)_fInputBufferTimer.GetValue(_p1WebController);
+                if (_fBufferedInputAction != null) c.bufferedInputAction = _fBufferedInputAction.GetValue(_p1WebController);
             }
             catch (Exception ex)
             {
@@ -5276,6 +5410,14 @@ namespace AWJSplitScreen
                 if (_fAttachToPlayerSound != null) _fAttachToPlayerSound.SetValue(_p1WebController, c.attachToPlayerSound);
                 if (_fMusicThreadSound != null) _fMusicThreadSound.SetValue(_p1WebController, c.musicThreadSound);
                 if (_fWebSound != null) _fWebSound.SetValue(_p1WebController, c.webSound);
+                if (_fLastTargetLocalPosition != null) _fLastTargetLocalPosition.SetValue(_p1WebController, c.lastTargetLocalPosition);
+                if (_fLastTargetObject != null) _fLastTargetObject.SetValue(_p1WebController, c.lastTargetObject);
+                if (_fLastWebTargetActive != null) _fLastWebTargetActive.SetValue(_p1WebController, c.lastWebTargetActive);
+                if (_fWebCoyoteTimeActive != null) _fWebCoyoteTimeActive.SetValue(_p1WebController, c.webCoyoteTimeActive);
+                if (_fWebCoyoteTimeTimer != null) _fWebCoyoteTimeTimer.SetValue(_p1WebController, c.webCoyoteTimeTimer);
+                if (_fInputBufferActive != null) _fInputBufferActive.SetValue(_p1WebController, c.inputBufferActive);
+                if (_fInputBufferTimer != null) _fInputBufferTimer.SetValue(_p1WebController, c.inputBufferTimer);
+                if (_fBufferedInputAction != null) _fBufferedInputAction.SetValue(_p1WebController, c.bufferedInputAction);
             }
             catch (Exception ex)
             {
@@ -5557,6 +5699,18 @@ namespace AWJSplitScreen
                 _p2Capsule.oldWebTargetObject = null;
                 _p2Capsule.oldWebTargetObject1 = null;
                 _p2Capsule.webAnchorObject = null;
+                // Do not inherit P1's WebBuilder coyote target or pending input.
+                // Those fields are used by ResolveBufferedTarget on a later shoot,
+                // which otherwise lets the first P1 shot resolve P2's last aim point.
+                _p2Capsule.lastTargetLocalPosition = Vector3.zero;
+                _p2Capsule.lastTargetObject = null;
+                _p2Capsule.lastWebTargetActive = false;
+                _p2Capsule.webCoyoteTimeActive = false;
+                _p2Capsule.webCoyoteTimeTimer = 0f;
+                _p2Capsule.inputBufferActive = false;
+                _p2Capsule.inputBufferTimer = 0f;
+                if (_fBufferedInputAction != null)
+                    _p2Capsule.bufferedInputAction = Enum.ToObject(_fBufferedInputAction.FieldType, 0);
                 PublishP2WebState();
 
                 if (_logger != null)
@@ -5708,7 +5862,11 @@ namespace AWJSplitScreen
                 if (_p2DeleteHoldTimer >= P2_DELETE_HOLD_DURATION)
                 {
                     _p2DeleteAllFired = true;
-                    InvokeAsP2(() => _mDestroyAllPlayerWebs.Invoke(_p1WebController, null), refreshTarget: false);
+                    var parameters = _mDestroyAllPlayerWebs.GetParameters();
+                    object[] args = parameters.Length == 2 ? new object[] { true, true }
+                        : parameters.Length == 1 ? new object[] { true }
+                        : null;
+                    InvokeAsP2(() => _mDestroyAllPlayerWebs.Invoke(_p1WebController, args), refreshTarget: false);
                 }
             }
             else if (bUp || !bHeld)
@@ -6269,6 +6427,14 @@ namespace AWJSplitScreen
             public object attachToPlayerSound;
             public object musicThreadSound;
             public string webSound;
+            public object lastTargetLocalPosition;
+            public object lastTargetObject;
+            public bool lastWebTargetActive;
+            public bool webCoyoteTimeActive;
+            public float webCoyoteTimeTimer;
+            public bool inputBufferActive;
+            public float inputBufferTimer;
+            public object bufferedInputAction;
         }
 
         private static MethodInfo FindMethod_Bool(Type t, string name)
